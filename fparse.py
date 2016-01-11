@@ -250,8 +250,9 @@ class InputStream(object):
         """Return next source code line and advance stream's position. Skips CPP's comments."""
         # skip over preprocessor lines
         while(True):
-            line = self.next_raw_line().strip()
-            if line and not line.startswith("#"):
+            line = self.next_raw_line()
+            line_stripped = line.strip()
+            if line_stripped and not line_stripped.startswith("#"):
                 return(line)
 
     def peek_next_line(self):
@@ -304,7 +305,7 @@ class InputStream(object):
                 elif(c == "&"):
                     i, line = -1, self.next_line() # line continuation
                 elif(c==";"):
-                    raise("Found semicolon line")
+                    self.pos2 = self.pos1 + i
                     break # end of fortan line
                     #TODO: put some of the line back into stream
                 else:
