@@ -83,8 +83,8 @@ def parse_module(stream):
     while(True):
         line = stream.peek_next_fortran_line()
         if(line.startswith("SUBROUTINE ")):
-           s =  parse_subroutine(stream)
-           ast['subroutines'].append(s)
+            s =  parse_subroutine(stream)
+            ast['subroutines'].append(s)
         elif(re.match("^END ?MODULE", line)):
             break # found module's closing line
         else:
@@ -101,7 +101,6 @@ def parse_interface(stream):
     while(not re.match("^END ?INTERFACE", stream.next_fortran_line())):
         pass
     return(ast)
-
 
 #===============================================================================
 def parse_type(stream):
@@ -165,13 +164,24 @@ def parse_subroutine(stream):
 
 #===============================================================================
 def parse_doxygen(stream):
+    # Save the beginning line of the subroutine/function
+    checkpoint, line1 = stream.peek_next_fortran_line(give_pos=True)
+
     # go backwards until a non-comment line is found
     while(stream.prev_line().startswith("!")):
         pass
 
     # now go forward again until first doxygen line is found
-    while(not stream.peek_next_line().startswith("!>")):
-        stream.next_line()
+    while(True):
+        line_at, line = stream.peek_next_line(give_pos=True)
+        if( line.startswith("!>") ):
+            break
+        else:
+            if( line_at==checkpoint ):
+                # No doxygen block (base/machine_posix.f90)
+                raise(Exception("no valid doxygen block for SUBR./FUNC. at: "+line1))
+                return {'brief':'', 'param':{}}
+            stream.next_line()
 
     # parse doxygen lines
     entries = []
@@ -218,7 +228,7 @@ def parse_use_statement(stream):
 #===============================================================================
 class ParserException(Exception):
     def __init__(self, line, locus):
-        print "Strange line:", line
+        print 'Strange line: "%s"' % line
 
 
 #===============================================================================
@@ -233,6 +243,7 @@ class InputStream(object):
     def next_raw_line(self):
         """Return next line including CPP-comments and advance stream's position"""
         self.pos1 = self.pos2 + 1 # skip over '\n' or ';'
+        assert(self.pos1<len(self.buffer)) # cannot go beyond the stream's end
         self.pos2 = self.buffer.find("\n", self.pos1)
         assert(self.pos2>0)
         line = self.buffer[ self.pos1 : self.pos2 ]
@@ -255,10 +266,12 @@ class InputStream(object):
             if line_stripped and not line_stripped.startswith("#"):
                 return(line)
 
-    def peek_next_line(self):
+    def peek_next_line(self, give_pos=False):
         pos1, pos2 = self.pos1, self.pos2
         line = self.next_line()
+        next_line_at = self.pos1
         self.pos1, self.pos2 = pos1, pos2
+        if( give_pos ): return (next_line_at, line)
         return(line)
 
     def prev_line(self):
@@ -321,13 +334,15 @@ class InputStream(object):
                 assert(False) # unkown state
 
         self.pos1 = pos1  # needed to make prev_line() work properly
-        return("".join(fortran_line))
+        return("".join(fortran_line).strip())
 
-    def peek_next_fortran_line(self):
+    def peek_next_fortran_line(self, give_pos=False):
         """Peek at next fortran line"""
         pos1, pos2 = self.pos1, self.pos2
         line = self.next_fortran_line()
+        next_line_at = self.pos1
         self.pos1, self.pos2 = pos1, pos2
+        if( give_pos ): return (next_line_at, line)
         return(line)
 
     def locus(self):
