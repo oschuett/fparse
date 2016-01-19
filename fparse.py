@@ -223,6 +223,9 @@ def parse_routine(stream):
 
 #===============================================================================
 def parse_doxygen(stream):
+    # Initialize
+    doxygen = {'author':[], 'brief':'', 'param':{}, 'retval':{}}
+
     # Save the beginning line of the subroutine/function
     checkpoint, line1 = stream.peek_next_fortran_line(give_pos=True)
 
@@ -239,7 +242,7 @@ def parse_doxygen(stream):
             if( line_at==checkpoint ):
                 # No doxygen block (base/machine_posix.f90)
                #raise(Exception("no valid doxygen block for SUBR./FUNC. at: "+line1))
-                return {'brief':'', 'param':{}, 'retval':{}}
+                return(doxygen)
             stream.next_line()
 
     # parse doxygen lines
@@ -248,25 +251,29 @@ def parse_doxygen(stream):
         line = stream.peek_next_line()
         if(not line.startswith("!>")):
             break
-        m = re.search(r"\\(\w+) (.*)", line)
+        m = re.search(r"\\([a-z]+)(.*)", line) # the 2nd group could be an empty string (cf. \note)
         if(m):
             entries.append(list(m.groups()))
         else:
-            if(entries):
-                entries[-1][1] += " " + line.split("!>",1)[1].strip()
+            assert(not line.startswith("!> \\")) # are we missing some doxygen tag?
+            entries[-1][1] += " " + line.split("!>",1)[1].strip()
         line = stream.next_line() # advance stream
 
     # interpret doxygen tags
-    doxygen = {'brief':'', 'param':{}, 'retval':{}}
     for k, v in entries:
-        if(k == "brief" or k == "author"):
-            doxygen[k] = v
-        elif(k == "param"):
-            if(not v): continue # some tmc/tmc_*.F files have "!> \param ", skipped by Doxygen
-            if(not " " in v): continue # common/cp_files.F: "!> \retval exist"
-            a, b = v.split(" ", 1)
-            if(b != "..."):
-                doxygen[k][a] = b
+        if(k == "brief"): # "If multiple \brief commands are present they will be joined"
+            doxygen[k] += " " + v.strip()
+        elif(k == "author"):
+            doxygen[k].append(v.strip())
+        elif(k == "param" or k == "retval"):
+            # Filter out [in], [out], ... and (optional) that otherwise will hide the argument
+            v = re.sub("^\[(int|in|out|in[.,]? ?out)\]", "", v, count=1).strip()
+            v = re.sub("^\((optinal|optional)\)", "", v, count=1).strip()
+            if(v and " " in v):
+                assert(re.match("\w+",v))
+                a, b = v.split(" ", 1)
+                if(b != "..."):
+                    doxygen[k][a] = b
         else:
             pass # ignore all other tags
             #raise(Exception("Strange Doxygen tag:"+k))
