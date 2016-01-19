@@ -82,9 +82,16 @@ def parse_module(stream):
     # parse stuff after CONTAINS
     while(True):
         line = stream.peek_next_fortran_line()
-        if(line.startswith("SUBROUTINE ")):
-            s =  parse_subroutine(stream)
-            ast['subroutines'].append(s)
+        if(line.split(" ",1)[0] in ("SUBROUTINE", "FUNCTION", "ELEMENTAL", "PURE", "RECURSIVE")):
+            s = parse_routine(stream)
+            ast[s['tag']+'s'].append(s)
+        elif(match_var_decl(line)):
+            # when a variable declaration is found here it is actually a
+            # function with the inline declaration of the returned value type
+            assert("FUNCTION" in line)
+            s = parse_routine(stream)
+            assert(s['tag']=='function')
+            ast['functions'].append(s)
         elif(re.match("^END ?MODULE", line)):
             break # found module's closing line
         else:
@@ -124,22 +131,63 @@ def parse_public_statement(stream):
 
 #===============================================================================
 def match_var_decl(line):
-    for t in ("CHARACTER", "INTEGER", "REAL", "LOGICAL", "TYPE("):
+    for t in ("CHARACTER", "INTEGER", "REAL", "COMPLEX", "LOGICAL", "TYPE("):
         if(line.startswith(t)):
             return(True)
     return(False)
 
 #===============================================================================
-def parse_subroutine(stream):
+def parse_routine(stream):
     doxygen = parse_doxygen(stream)
 
     line1 = stream.next_fortran_line()
-    m = re.match("SUBROUTINE (.*)\((.*)\)", line1)
-    name, args = m.groups()
-    ast = {'tag':'subroutine', 'name':name, 'descr':doxygen['brief'], 'args':[]}
-    for a in args.split(","):
-        descr = doxygen['param'][a] if(doxygen['param'].has_key(a)) else ""
-        ast['args'].append({'tag':'argument', 'name':a, 'descr':descr})
+    regex = '(.*)(FUNCTION|SUBROUTINE) (\w+)(?:\((.*?)\))?(.*)' # it is used afterwards too...
+    """      |   |                     |    |    |        |
+             |   |                     |    |    |        .
+             |   |                     |    |    |         \..postfix: RESULT(..) | BIND(..)
+             |   |                     |    |    .
+             |   |                     |    |     \..arguments list
+             |   |                     |    .
+             |   |                     |     \..[non-capturing group: the "()" empty list of arguments can be omitted]
+             |   .                     .
+             |    \..whatis             \..name
+             .
+              \..prefix: RECURSIVE | PURE | ...
+    """
+
+    m = re.match(regex, line1)
+    prefix, whatis, name, args, postfix = m.groups()
+    ast = {'tag':whatis.lower(), 'name':name, 'descr':doxygen['brief'], 'args':[], 'attrs':[]}
+
+    if(args):
+        for a in args.split(","):
+            descr = doxygen['param'][a] if(doxygen['param'].has_key(a)) else ""
+            ast['args'].append({'tag':'argument', 'name':a, 'descr':descr})
+
+    if(postfix):
+        for item, what, content in re.findall("((RESULT|BIND)\((.+?)\))", postfix.strip()):
+            if( what == "RESULT" ):
+                descr = doxygen['retval'][content] if(doxygen['retval'].has_key(content)) else ""
+                ast['retval'] = {'tag':'return_value', 'name':content, 'descr':descr}
+            elif( what == "BIND" ):
+                ast['attrs'].append(item)
+            else:
+                raise Exception("Unknown postfix item: "+item)
+
+    if(prefix):
+        retval_type = None
+        for a in prefix.split():
+            if(match_var_decl(a)):
+                assert(not retval_type and whatis=="FUNCTION")
+                retval_type = a
+                continue
+            assert(a in ("ELEMENTAL", "PURE", "RECURSIVE"))
+            ast['attrs'].append(a)
+        if(retval_type):
+            assert(not 'retval' in ast) # check meaningful if prefix is processed after postfix
+            retval = name.lower()
+            descr = doxygen['retval'][retval] if(doxygen['retval'].has_key(retval)) else ""
+            ast['retval'] = {'tag':'return_value', 'name':name, 'descr':descr, 'type':retval_type}
 
     # parse variable declarations
     while(True):
@@ -150,17 +198,28 @@ def parse_subroutine(stream):
             break
 
     # skip over subroutines body and ignore nested subroutines
-    open_subs = 1
+    stack = [ast["tag"].upper()]
     while(True):
         line = stream.next_fortran_line()
-        if(line.startswith("SUBROUTINE")):
-            open_subs += 1
-        elif(re.match("^END ?SUBROUTINE", line)):
-            open_subs -= 1
-            if(open_subs==0):
-                break
+        m = re.match(regex, line)
+        if(re.match("^END ?SUBROUTINE", line)):
+            assert(stack.pop() == "SUBROUTINE")
+        elif(re.match("^END ?FUNCTION", line)):
+            assert(stack.pop() == "FUNCTION")
+        elif(m):
+            prefix, whatis, name, args, postfix = m.groups()
+            if(
+               all(
+                 [(a in ("ELEMENTAL", "PURE", "RECURSIVE") or match_var_decl(a)) for a in prefix.split()]
+               )
+            ):
+                stack.append( whatis )
+
+        if(not stack):
+            break
 
     return(ast)
+
 
 #===============================================================================
 def parse_doxygen(stream):
@@ -179,8 +238,8 @@ def parse_doxygen(stream):
         else:
             if( line_at==checkpoint ):
                 # No doxygen block (base/machine_posix.f90)
-                raise(Exception("no valid doxygen block for SUBR./FUNC. at: "+line1))
-                return {'brief':'', 'param':{}}
+               #raise(Exception("no valid doxygen block for SUBR./FUNC. at: "+line1))
+                return {'brief':'', 'param':{}, 'retval':{}}
             stream.next_line()
 
     # parse doxygen lines
@@ -193,18 +252,21 @@ def parse_doxygen(stream):
         if(m):
             entries.append(list(m.groups()))
         else:
-            entries[-1][1] += " " + line.split("!>",1)[1].strip()
+            if(entries):
+                entries[-1][1] += " " + line.split("!>",1)[1].strip()
         line = stream.next_line() # advance stream
 
     # interpret doxygen tags
-    doxygen = {'brief':'', 'param':{}}
+    doxygen = {'brief':'', 'param':{}, 'retval':{}}
     for k, v in entries:
-        if(k == "brief"):
-            doxygen['brief'] = v
+        if(k == "brief" or k == "author"):
+            doxygen[k] = v
         elif(k == "param"):
+            if(not v): continue # some tmc/tmc_*.F files have "!> \param ", skipped by Doxygen
+            if(not " " in v): continue # common/cp_files.F: "!> \retval exist"
             a, b = v.split(" ", 1)
             if(b != "..."):
-                doxygen['param'][a] = b
+                doxygen[k][a] = b
         else:
             pass # ignore all other tags
             #raise(Exception("Strange Doxygen tag:"+k))
