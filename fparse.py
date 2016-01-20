@@ -68,7 +68,7 @@ def parse_module(stream):
         elif(line.startswith("PUBLIC::")):
             syms = parse_public_statement(stream)
             ast['publics'].extend(syms)
-        elif(line.startswith("INTERFACE ")):
+        elif(line.startswith("INTERFACE")):
             a =  parse_interface(stream)
             ast['interfaces'].append(a)
         elif(line == "CONTAINS"):
@@ -103,7 +103,7 @@ def parse_module(stream):
 def parse_interface(stream):
     line = stream.next_fortran_line()
     assert(line.startswith("INTERFACE"))
-    name = line.split(" ",1)[1]
+    name = line.split(" ",1)[1] if(" " in line) else ""
     ast = {'tag':'interface', 'name':name}
     while(not re.match("^END ?INTERFACE", stream.next_fortran_line())):
         pass
@@ -227,7 +227,14 @@ def parse_doxygen(stream):
     doxygen = {'author':[], 'brief':'', 'param':{}, 'retval':{}}
 
     # Save the beginning line of the subroutine/function
+    #   If there is no valid doxygen block before the current subroutine or
+    #   function the next *forward* "while(True)" loop will eat the entire
+    #   stream till the end! So we save here a checkpoint that we later enforce
+    #   not to be crossed.
     checkpoint, line1 = stream.peek_next_fortran_line(give_pos=True)
+    assert("SUBROUTINE" in line1 or "FUNCTION" in line1)
+    # advance stream position
+    stream.next_fortran_line()
 
     # go backwards until a non-comment line is found
     while(stream.prev_line().startswith("!")):
@@ -287,7 +294,8 @@ def parse_use_statement(stream):
     if("ONLY:" in line):
         mod_from, rest = line[4:].split(",", 1)
         only = rest.split("ONLY:",1)[1].split(",")
-        only_map = dict([(x,x) for x in only])
+        only_map = dict([tuple(x.split('=>',1)) if '=>' in x else (x,x) for x in only])
+        assert(all( [re.match('\w+$',k) for k in only_map] ))
         ast = {'tag':'use_stm', 'from':mod_from, 'only':only_map}
     else:
         ast = {'tag':'use_stm', 'from':line[4:].strip()}
@@ -321,7 +329,8 @@ class InputStream(object):
     def prev_raw_line(self):
         """Return next line including CPP-comments and advance stream's position"""
         self.pos2 = self.pos1 - 1  # skip over '\n' or ';'
-        self.pos1 = self.buffer.rfind("\n", 0, self.pos2)
+        assert( self.buffer[self.pos2] == '\n' )
+        self.pos1 = self.buffer.rfind("\n", 0, self.pos2) + 1
         assert(self.pos1>0)
         line = self.buffer[ self.pos1 : self.pos2 ]
         return(line)
