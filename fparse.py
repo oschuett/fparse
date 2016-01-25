@@ -104,9 +104,24 @@ def parse_interface(stream):
     line = stream.next_fortran_line()
     assert(line.startswith("INTERFACE"))
     name = line.split(" ",1)[1] if(" " in line) else ""
-    ast = {'tag':'interface', 'name':name}
-    while(not re.match("^END ?INTERFACE", stream.next_fortran_line())):
-        pass
+    ast = {'tag':'interface', 'name':name, 'procedures':[]}
+    while(True):
+        # The line is only peeked here and the stream advanced later on
+        #   in order to be able to call parse_routine() afterwards.
+        line = stream.peek_next_fortran_line()
+        if(re.match("^END ?INTERFACE", line)):
+            stream.next_fortran_line()
+            break
+        m = re.match("^MODULE PROCEDURE (.+)$", line)
+        if(m):
+            assert(name)
+            ast['task'] = 'overloading'
+            ast['procedures'].extend( m.groups()[0].split(",") )
+            stream.next_fortran_line()
+        else:
+            f = parse_routine(stream)
+            assert(f['tag'] in ("subroutine", "function"))
+            ast['procedures'].append(f['name'])
     return(ast)
 
 #===============================================================================
@@ -142,18 +157,17 @@ def parse_routine(stream):
 
     line1 = stream.next_fortran_line()
     regex = '(.*)(FUNCTION|SUBROUTINE) (\w+)(?:\((.*?)\))?(.*)' # it is used afterwards too...
-    """      |   |                     |    |    |        |
-             |   |                     |    |    |        .
-             |   |                     |    |    |         \..postfix: RESULT(..) | BIND(..)
-             |   |                     |    |    .
-             |   |                     |    |     \..arguments list
-             |   |                     |    .
-             |   |                     |     \..[non-capturing group: the "()" empty list of arguments can be omitted]
-             |   .                     .
-             |    \..whatis             \..name
-             .
-              \..prefix: RECURSIVE | PURE | ...
-    """
+    #        |   |                     |    |    |        |
+    #        |   |                     |    |    |        .
+    #        |   |                     |    |    |         \..postfix: RESULT(..) | BIND(..)
+    #        |   |                     |    |    .
+    #        |   |                     |    |     \..arguments list
+    #        |   |                     |    .
+    #        |   |                     |     \..[non-capturing group: the "()" empty list of arguments can be omitted]
+    #        |   .                     .
+    #        |    \..whatis             \..name
+    #        .
+    #         \..prefix: RECURSIVE | PURE | ...
 
     m = re.match(regex, line1)
     prefix, whatis, name, args, postfix = m.groups()
