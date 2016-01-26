@@ -152,6 +152,205 @@ def match_var_decl(line):
     return(False)
 
 #===============================================================================
+def parse_var_decl(line):
+
+    # Obtain the common info for all the variables declared here
+    if "::" in line:
+        m = re.match("((?:[A-Z]+)(?:\(.+?\))?)(,.+)?::(.*)",line)
+        #             |:         :            |       |
+        #             |:         :            |       .
+        #             |:         :            |        \..variables list
+        #             |:         :            .
+        #             |:         :             \..attributes list (must be a greedy matching pattern!)
+        #             |:         .
+        #             |:          \..[non-capturing group: e.g.: "(KIND=INT_8)"]
+        #             |.
+        #             | \..[non-capturing group: "INTEGER", "LOGICAL", ...]
+        #             .
+        #              \..variable type
+        vtype, attrlist, varlist = m.groups()
+    else:
+        # Much simpler case: there is no attribute!
+        attrlist = None
+        m = re.match("((?:[A-Z]+)(?:\(.+?\))?) (.*)",line)
+        if(not m):
+            # The 1st executable statement could begin with a pattern that is
+            #   misleading for match_var_decl().
+            #   E.g.: "real_file_name = ..." [FUNCTION:file_exists, common/cp_files.F]
+            #   Need this check to escape in such a case.
+            return
+        vtype, varlist = m.groups()
+
+    # Now deal with attributes
+    attrs = get_attributes(attrlist)
+
+    # Process variables
+    variables = get_variables(varlist, vtype, attrs)
+
+    return(variables)
+
+#===============================================================================
+def get_attributes(attrlist):
+    attrs = {'keywd_attrs':[], 'dimension':None, 'intent':None}
+    while(attrlist):
+        k, v = get_next_attribute(attrlist)
+        if(k in ("ALLOCATABLE", "EXTERNAL", "OPTIONAL",
+                 "PARAMETER", "POINTER", "PRIVATE", "PUBLIC",
+                 "SAVE", "TARGET", "VALUE", "VOLATILE")):
+            assert(not v)
+            attrs['keywd_attrs'].append(k)
+        elif(k ==  "INTENT"):
+            m = re.match("\(([A-Z]+)\)$", v)
+            intent = m.groups()[0]
+            assert(intent in ("IN", "OUT", "INOUT"))
+            attrs['intent'] = intent
+        elif(k ==  "DIMENSION"):
+            m = re.match("\((.+)\)$", v)
+            assert(m)
+            attrs['dimension'] = v
+        else:
+            raise Exception('problem with input: "%s" (attr key: "%s")'%(line,k))
+        raw = k + v
+        to_skip = "," + raw
+        assert(attrlist.startswith(to_skip))
+        attrlist = attrlist[ len(to_skip) : ]  # skip the successfully processed attribute
+    return attrs
+
+#===============================================================================
+def get_next_attribute(string):
+    """Decode variable attributes: return the first one found in the input string
+       that is in the form: ',<1st attribute>[(...)],<2nd attr.>,...'
+       A State-machine is needed to deal with nested parentheses. """
+    m = re.match(",([A-Z]+)(.*)",string)
+    kw, postfix = m.groups()
+    ppattern = ""
+    state = "start"
+    for c in postfix:  # process char by char what is beyond the keyword kw
+
+        if(state=="start"):
+            if(c == ','):
+                break
+            elif(c == '('):
+                n_opened = 1
+                ppattern = c
+                state = "p_open"
+            else:
+                raise Exception('char "%c" unknown for state "%s" [%s]'%(c,state,string))
+
+        elif(state=="p_open"):
+            ppattern += c
+            if(c == "("):
+                n_opened += 1
+            elif(c == ")"):
+                n_opened -= 1
+                if(n_opened==0):
+                    state = "start"
+            else:
+                pass
+
+        else:
+            assert(False) # Unknown state
+
+    assert(state=="start")  # allowed final state
+    return ( kw, ppattern )
+
+#===============================================================================
+def get_variables(varlist, vtype, attrs):
+    """Return a list. Each list item is a dictionary related to a variable found in the input string.
+       Each variable comes with its name and eventually attributes, dimension, intent or initialization."""
+    assert(varlist)
+    variables = []
+    varlist += ","
+    while(varlist):
+        v = get_next_variable(varlist)
+        to_skip = v.pop('raw') + ","
+        assert(varlist.startswith(to_skip))
+        varlist = varlist[ len(to_skip) : ]  # skip the successfully processed variable
+
+        # update the variable with the common info
+        v['type'] = vtype
+        v['attrs'] = attrs
+
+        variables.append(v)
+    return variables
+
+#===============================================================================
+def get_next_variable(string):
+    """Decode variable list: return the first variable found in the input string.
+       A State-machine is used to deal with nested parentheses or inline
+       initialization (eventually with quoted strings)."""
+    m = re.match("(\w+)(.*)",string)
+    name, postfix = m.groups()
+    v = {'tag':'variable', 'name':name}
+    n_opened = 0
+    state = "start"
+    ichar = 0
+    while(True):  # process char by char what is beyond the identifier
+        c = postfix[ichar]
+
+        if(state=="start"):
+            if(c == ','):
+                break
+            elif(c == '='):
+                v['init'] = c
+                state = "init"
+            elif(c == '('):
+                assert(n_opened==0)
+                n_opened = 1
+                ppattern = c
+                state = "p_open%" + state
+            else:
+                raise Exception('char "%c" unknown for state "%s" [%s]'%(c,state,string[:-1]))
+
+        elif(state=="init"):
+            if(c == ','):
+                break
+            elif(c == "'" or c == '"'):
+                v['init'] += c
+                state = "str:"+c
+            elif(re.match('\w', c)):
+                v['init'] += c
+            elif(c in ('+','-','*','/','.','>')):
+                v['init'] += c
+            elif(c == '('):
+                assert(n_opened==0)
+                n_opened = 1
+                ppattern = c
+                state = "p_open%" + state
+            else:
+                raise Exception('char "%c" unknown for state "%s" [%s]'%(c,state,string[:-1]))
+
+        elif(state.startswith("str:")):  # this state can only be reached from "init"
+            v['init'] += c
+            if(state.split(":",1)[1] == c):
+                state = "init"
+
+        elif(state.startswith("p_open%")):
+            ppattern += c
+            if(c == "("):
+                n_opened += 1
+            elif(c == ")"):
+                n_opened -= 1
+                if(n_opened==0):
+                    prev_state = state.split("%",1)[1]
+                    if(prev_state == "start"):
+                        v['dim'] = ppattern
+                    elif(prev_state == "init"):
+                        v['init'] += ppattern
+                    else:
+                        raise Exception('unknown previous state: "%s"'%prev_state)
+                    state = prev_state
+
+        else:
+            raise Exception('unknown state: "%s"'%state)
+
+        ichar += 1
+
+    assert(state=="start" or state=="init")  # allowed final states
+    v['raw'] = "".join( [v[k] if k in v else "" for k in ('name', 'dim', 'init')] )
+    return v
+
+#===============================================================================
 def parse_routine(stream):
     doxygen = parse_doxygen(stream)
 
@@ -203,10 +402,30 @@ def parse_routine(stream):
             descr = doxygen['retval'][retval] if(doxygen['retval'].has_key(retval)) else ""
             ast['retval'] = {'tag':'return_value', 'name':name, 'descr':descr, 'type':retval_type}
 
-    # parse variable declarations
+    # support list of arguments name
+    argnamelist = [a['name'] for a in ast['args']]
+    # for following code to work when retval is not defined
+    retvalname = ast['retval']['name'] if 'retval' in ast else ""
+
+    # parse variable declarations: fetch info on arguments type and attributes
     while(True):
         line = stream.peek_next_fortran_line()
         if(match_var_decl(line)):
+            vlist = parse_var_decl(line)
+            if(not vlist):
+                # line erroneously considered variable declaration by match_var_decl()
+                break
+            for v in vlist:
+                a = v['name']
+                vinfo = {'type':v['type'], 'attrs':v['attrs']}
+                if(a in argnamelist):
+                    i = argnamelist.index(a)
+                    ast['args'][i].update(vinfo)
+                elif(a == retvalname):
+                    assert(not 'type' in ast['retval'])
+                    ast['retval'].update(vinfo)
+                else:
+                    pass  # local variable
             stream.next_fortran_line() # skip line
         else:
             break
