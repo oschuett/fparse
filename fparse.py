@@ -44,7 +44,7 @@ def parse_module(stream):
     kw, name = stream.next_fortran_line().split()
     assert(kw == "MODULE")
 
-    ast = {'tag':'module', 'name':name, 'uses':[], 'publics':[], 'types':[], 'subroutines':[], 'functions':[], 'interfaces':[]}
+    ast = {'tag':'module', 'name':name, 'uses':[], 'publics':[], 'types':[], 'subroutines':[], 'functions':[], 'interfaces':[], 'variables':[]}
 
     # parse stuff before CONTAINS
     private = False
@@ -60,7 +60,9 @@ def parse_module(stream):
             stream.next_fortran_line() # skip line
         elif(match_var_decl(line)):
             # these could be public if PRIVATE was not (yet) found
-            #print "Found variable declaration"
+            vlist = parse_var_decl(line)
+            assert(vlist) # No executable statements allowed here!
+            ast['variables'].extend(vlist)
             stream.next_fortran_line() # skip line
         elif(line.startswith("TYPE ")):
             t = parse_type(stream)
@@ -116,7 +118,7 @@ def parse_interface(stream):
         if(m):
             assert(name)
             ast['task'] = 'overloading'
-            ast['procedures'].extend( m.groups()[0].split(",") )
+            ast['procedures'].extend( m.group(1).split(",") )
             stream.next_fortran_line()
         else:
             f = parse_routine(stream)
@@ -155,31 +157,29 @@ def match_var_decl(line):
 def parse_var_decl(line):
 
     # Obtain the common info for all the variables declared here
+    vtype = get_var_type(line)
+    if not vtype:
+        # The 1st executable statement could begin with a pattern that is
+        #   misleading for match_var_decl().
+        #   E.g.: "real_file_name = ..." [FUNCTION:file_exists, common/cp_files.F]
+        #   Need this check to escape in such a case.
+        return
+    assert(line.startswith(vtype))
+
     if "::" in line:
-        m = re.match("((?:[A-Z]+)(?:\(.+?\))?)(,.+)?::(.*)",line)
-        #             |:         :            |       |
-        #             |:         :            |       .
-        #             |:         :            |        \..variables list
-        #             |:         :            .
-        #             |:         :             \..attributes list (must be a greedy matching pattern!)
-        #             |:         .
-        #             |:          \..[non-capturing group: e.g.: "(KIND=INT_8)"]
-        #             |.
-        #             | \..[non-capturing group: "INTEGER", "LOGICAL", ...]
-        #             .
-        #              \..variable type
-        vtype, attrlist, varlist = m.groups()
+        m = re.match(re.escape(vtype)+"(,.+)?::(.*)",line)
+        attrlist, varlist = m.groups()
+
     else:
-        # Much simpler case: there is no attribute!
+        # simpler case: there is no attribute!
         attrlist = None
-        m = re.match("((?:[A-Z]+)(?:\(.+?\))?) (.*)",line)
-        if(not m):
-            # The 1st executable statement could begin with a pattern that is
-            #   misleading for match_var_decl().
-            #   E.g.: "real_file_name = ..." [FUNCTION:file_exists, common/cp_files.F]
-            #   Need this check to escape in such a case.
-            return
-        vtype, varlist = m.groups()
+        m = re.match(re.escape(vtype)+"( )?(.*)",line)
+        sep, varlist = m.groups()
+        if sep:
+            assert(sep==' ')
+            assert(re.match("[A-Z]+$",vtype))
+        else:
+            assert(re.match("[A-Z]+\(.*\)$",vtype))
 
     # Now deal with attributes
     attrs = get_attributes(attrlist)
@@ -191,7 +191,7 @@ def parse_var_decl(line):
 
 #===============================================================================
 def get_attributes(attrlist):
-    attrs = {'keywd_attrs':[], 'dimension':None, 'intent':None}
+    attrs = {'keywd_attrs':[], 'dimension':None, 'intent':None, 'raw':[]}
     while(attrlist):
         k, v = get_next_attribute(attrlist)
         if(k in ("ALLOCATABLE", "EXTERNAL", "OPTIONAL",
@@ -201,16 +201,17 @@ def get_attributes(attrlist):
             attrs['keywd_attrs'].append(k)
         elif(k ==  "INTENT"):
             m = re.match("\(([A-Z]+)\)$", v)
-            intent = m.groups()[0]
+            intent = m.group(1)
             assert(intent in ("IN", "OUT", "INOUT"))
             attrs['intent'] = intent
         elif(k ==  "DIMENSION"):
-            m = re.match("\((.+)\)$", v)
+            m = re.match("(\(.+\))$", v)
             assert(m)
             attrs['dimension'] = v
         else:
             raise Exception('problem with input: "%s" (attr key: "%s")'%(line,k))
         raw = k + v
+        attrs['raw'].append(raw)
         to_skip = "," + raw
         assert(attrlist.startswith(to_skip))
         attrlist = attrlist[ len(to_skip) : ]  # skip the successfully processed attribute
@@ -253,6 +254,58 @@ def get_next_attribute(string):
 
     assert(state=="start")  # allowed final state
     return ( kw, ppattern )
+
+#===============================================================================
+def get_var_type(string):
+    my_re = re.compile("([A-Z]+)(.*)")
+    m = my_re.match(string)
+    kw, postfix = m.groups()
+
+    # kw must match the whole identifier at the beginning of the string
+    #   if not: this is not a variable declaration!
+    if kw != re.match("\w+", string).group(0):
+        return
+
+    ppattern = ""
+    state = "start"
+    for i, c in enumerate(postfix):
+        if(state=="start"):
+            if(c == ','):
+                # an attribute is coming: var_type is complete!
+                break
+            elif(c == ':'):
+                # the variables list is coming: var_type is complete ("::")!
+                assert(postfix[i:].startswith("::"))
+                assert(my_re.match(postfix[i+2:]))
+                break
+            elif(c == ' '):
+                # the variables list is coming: var_type is complete (" ")!
+                assert(my_re.match(postfix[i+1:]))
+                break
+            elif(my_re.match(postfix[i:])):
+                assert(ppattern)
+                break
+            elif(c == '('):
+                n_opened = 1
+                ppattern = c
+                state = "p_open"
+            else:
+                raise Exception('char "%c" unknown for state "%s" [%s]'%(c,state,string))
+        elif(state=="p_open"):
+            ppattern += c
+            if(c == "("):
+                n_opened += 1
+            elif(c == ")"):
+                n_opened -= 1
+                if(n_opened==0):
+                    state = "start"
+            else:
+                pass
+        else:
+            assert(False) # Unknown state
+
+    assert(state=="start")
+    return kw + ppattern
 
 #===============================================================================
 def get_variables(varlist, vtype, attrs):
@@ -425,7 +478,9 @@ def parse_routine(stream):
                     assert(not 'type' in ast['retval'])
                     ast['retval'].update(vinfo)
                 else:
-                    pass  # local variable
+                    pass  # local variables
+            stream.next_fortran_line() # skip line
+        elif(line == "IMPLICIT NONE"):
             stream.next_fortran_line() # skip line
         else:
             break
@@ -513,7 +568,7 @@ def parse_doxygen(stream):
                 assert(re.match("\w+",v))
                 a, b = v.split(" ", 1)
                 if(b != "..."):
-                    doxygen[k][a] = b
+                    doxygen[k][a.upper()] = b.strip()
         else:
             pass # ignore all other tags
             #raise(Exception("Strange Doxygen tag:"+k))
