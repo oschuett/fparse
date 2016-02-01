@@ -65,7 +65,8 @@ def parse_module(stream):
             assert(vlist) # No executable statements allowed here!
             ast['variables'].extend(vlist)
             stream.next_fortran_line() # skip line
-        elif(line.startswith("TYPE ")):
+        elif(line.startswith("TYPE")):
+            assert(not line.startswith("TYPE("))
             t = parse_type(stream)
             ast['types'].append(t)
         elif(line.startswith("PUBLIC")):
@@ -73,6 +74,7 @@ def parse_module(stream):
             ast['publics'].extend(syms)
         elif(line.startswith("PRIVATE")):
             syms = parse_pubpriv_statement(stream)
+            # only the name of these symbols is retained here
             private_syms.extend([sym['name'] for sym in syms])
         elif(line.startswith("INTERFACE")):
             a =  parse_interface(stream)
@@ -137,10 +139,29 @@ def parse_interface(stream):
 def parse_type(stream):
     line = stream.next_fortran_line()
     assert(line.startswith("TYPE"))
-    name = line.split(" ",1)[1]
-    ast = {'tag':'type', 'name':name}
-    while(not re.match("^END ?TYPE", stream.next_fortran_line())):
-        pass
+    attrlist, sep, name = re.match("TYPE(,BIND\(.*\))?( |::)(.+)", line).groups()
+    ast = {'tag':'type', 'name':name, 'variables':[]}
+
+    if attrlist:
+        assert(sep=='::')
+        ast['attrs'] = attrlist[1:]
+
+    private = False
+    while(True):
+        line = stream.next_fortran_line()
+        if(re.match("^END ?TYPE", line)):
+            break
+        elif(line == "PRIVATE"):
+            private = True
+        elif(match_var_decl(line)):
+            vlist = parse_var_decl(line)
+            assert(vlist) # No executable statements allowed here!
+            ast['variables'].extend(vlist)
+        else:
+            raise ParserException(line, stream.locus())
+
+    set_visibility(ast['variables'], [], private)
+
     return(ast)
 
 #===============================================================================
