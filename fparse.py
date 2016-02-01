@@ -48,6 +48,7 @@ def parse_module(stream):
 
     # parse stuff before CONTAINS
     private = False
+    private_syms = []
     while(True):
         line = stream.peek_next_fortran_line()
         if(line.startswith("USE ")):
@@ -67,9 +68,12 @@ def parse_module(stream):
         elif(line.startswith("TYPE ")):
             t = parse_type(stream)
             ast['types'].append(t)
-        elif(line.startswith("PUBLIC::")):
-            syms = parse_public_statement(stream)
+        elif(line.startswith("PUBLIC")):
+            syms = parse_pubpriv_statement(stream)
             ast['publics'].extend(syms)
+        elif(line.startswith("PRIVATE")):
+            syms = parse_pubpriv_statement(stream)
+            private_syms.extend([sym['name'] for sym in syms])
         elif(line.startswith("INTERFACE")):
             a =  parse_interface(stream)
             ast['interfaces'].append(a)
@@ -80,6 +84,9 @@ def parse_module(stream):
             break # not every module has a CONTAINS
         else:
             raise ParserException(line, stream.locus())
+
+    # here all the PUBLIC/PRIVATE statements/attributes should have been set!
+    set_visibility(ast['variables'], ast['publics'], private, private_syms)
 
     # parse stuff after CONTAINS
     while(True):
@@ -137,14 +144,38 @@ def parse_type(stream):
     return(ast)
 
 #===============================================================================
-def parse_public_statement(stream):
+def parse_pubpriv_statement(stream):
     ast = []
     line = stream.next_fortran_line() # skip line
-    assert(line.startswith("PUBLIC::"))
+    m = re.match("(PUBLIC|PRIVATE)(::| )(.*)$",line)
+    vis, sep, syms = m.groups()
     is_api = stream.peek_prev_line().replace(" ","").startswith("!API")
-    syms = line.split("::",1)[1].split(",")
-    ast = [{'tag':'public', 'name':s, 'is_api':is_api} for s in syms]
+    ast = [{'tag':vis.lower(), 'name':s, 'is_api':is_api} for s in syms.split(",")]
     return(ast)
+
+#===============================================================================
+def set_visibility(variables, publics, private, privlist=[]):
+    publist = [item['name'] for item in publics]
+    default = 'PRIVATE' if private else 'PUBLIC'
+    for v in variables:
+
+        vis = set(v['attrs']['keywd_attrs']).intersection(('PRIVATE','PUBLIC'))
+        if(vis):
+            # visibility already set via the variable declaration line!
+            assert(not v['name'] in publist)
+            assert(not v['name'] in privlist)
+            assert(len(vis)==1)
+            v['visibility'] = vis.pop()
+
+        elif(v['name'] in publist):
+            v['visibility'] = 'PUBLIC'
+
+        elif(v['name'] in privlist):
+            v['visibility'] = 'PRIVATE'
+
+        else:
+            # fallback to default visibility
+            v['visibility'] = default
 
 #===============================================================================
 def match_var_decl(line):
@@ -179,7 +210,7 @@ def parse_var_decl(line):
             assert(sep==' ')
             assert(re.match("[A-Z]+$",vtype))
         else:
-            assert(re.match("[A-Z]+\(.*\)$",vtype))
+            assert(re.match("[A-Z]+\(.+\)$",vtype))
 
     # Now deal with attributes
     attrs = get_attributes(attrlist)
@@ -594,7 +625,6 @@ def parse_use_statement(stream):
 class ParserException(Exception):
     def __init__(self, line, locus):
         print 'Strange line: "%s"' % line
-
 
 #===============================================================================
 class InputStream(object):
