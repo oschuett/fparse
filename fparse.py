@@ -460,20 +460,20 @@ def parse_routine(stream):
     doxygen = parse_doxygen(stream)
 
     line1 = stream.next_fortran_line()
-    regex = '(.*)(FUNCTION|SUBROUTINE) (\w+)(?:\((.*?)\))?(.*)' # it is used afterwards too...
-    #        |   |                     |    |    |        |
-    #        |   |                     |    |    |        .
-    #        |   |                     |    |    |         \..postfix: RESULT(..) | BIND(..)
-    #        |   |                     |    |    .
-    #        |   |                     |    |     \..arguments list
-    #        |   |                     |    .
-    #        |   |                     |     \..[non-capturing group: the "()" empty list of arguments can be omitted]
-    #        |   .                     .
-    #        |    \..whatis             \..name
-    #        .
-    #         \..prefix: RECURSIVE | PURE | ...
+    regex = re.compile('(.*)(FUNCTION|SUBROUTINE) (\w+)(?:\((.*?)\))?(.*)') # it is used afterwards too...
+    #                   |   |                     |    |    |        |
+    #                   |   |                     |    |    |        .
+    #                   |   |                     |    |    |         \..postfix: RESULT(..) | BIND(..)
+    #                   |   |                     |    |    .
+    #                   |   |                     |    |     \..arguments list
+    #                   |   |                     |    .
+    #                   |   |                     |     \..[non-capturing group: the "()" empty list of arguments can be omitted]
+    #                   |   .                     .
+    #                   |    \..whatis             \..name
+    #                   .
+    #                    \..prefix: RECURSIVE | PURE | ...
 
-    m = re.match(regex, line1)
+    m = regex.match(line1)
     prefix, whatis, name, args, postfix = m.groups()
     ast = {'tag':whatis.lower(), 'name':name, 'descr':doxygen['brief'], 'args':[], 'attrs':[]}
 
@@ -541,7 +541,7 @@ def parse_routine(stream):
     stack = [ast["tag"].upper()]
     while(True):
         line = stream.next_fortran_line()
-        m = re.match(regex, line)
+        m = regex.match(line)
         if(re.match("^END ?SUBROUTINE", line)):
             assert(stack.pop() == "SUBROUTINE")
         elif(re.match("^END ?FUNCTION", line)):
@@ -708,7 +708,7 @@ class InputStream(object):
         """Return next logical fortran line and advance stream's position
            Any spaces are removed, except between words.
            Chars and chars are upper cased.
-           String are preserverd."""
+           String are preserved."""
         fortran_line = []
         state = "start"
         line = self.next_line()
@@ -733,10 +733,13 @@ class InputStream(object):
                     else:
                         break # fortran line ends here
                 elif(c == "&"):
+                    # skip prefix comment lines after ampersand
+                    while(self.peek_next_line().strip().startswith("!")):
+                        line = self.next_line()
                     i, line = -1, self.next_line() # line continuation
                 elif(c==";"):
                     self.pos2 = self.pos1 + i
-                    break # end of fortan line
+                    break # end of fortran line
                     #TODO: put some of the line back into stream
                 else:
                     if(fortran_line and fortran_line[-1]==" " and not c.isalpha()):
