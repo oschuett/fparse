@@ -645,7 +645,7 @@ def parse_use_statement(stream):
 #===============================================================================
 class ParserException(Exception):
     def __init__(self, line, locus):
-        print 'Strange line: "%s"' % line
+        print 'Strange line: "%s" [%s]' % (line, locus)
 
 #===============================================================================
 class InputStream(object):
@@ -655,6 +655,7 @@ class InputStream(object):
         self.filename = filename
         self.pos1 = -1
         self.pos2 = -1
+        self._cpp_line_index, self._cpp_file_name, self._cpp_beg_pos1, self._cpp_cur_pos1, self._cpp_cur_pos2 = [None]*5
 
     def next_raw_line(self):
         """Return next line including CPP-comments and advance stream's position"""
@@ -676,11 +677,17 @@ class InputStream(object):
 
     def next_line(self):
         """Return next source code line and advance stream's position. Skips CPP's comments."""
-        # skip over preprocessor lines
+        # skip over empty lines or preprocessor lines
         while(True):
             line = self.next_raw_line()
             line_stripped = line.strip()
-            if line_stripped and not line_stripped.startswith("#"):
+            if line_stripped.startswith("#"):
+                # preprocessor lines are used to get the info needed by locus()
+                line_index, file_name = line_stripped.split()[1:3]
+                self._cpp_line_index = int(line_index)
+                self._cpp_file_name  = file_name[1:-1]
+                self._cpp_beg_pos1   = self.pos1
+            elif line_stripped:
                 return(line)
 
     def peek_next_line(self, give_pos=False):
@@ -753,22 +760,29 @@ class InputStream(object):
             else:
                 assert(False) # unkown state
 
-        self.pos1 = pos1  # needed to make prev_line() work properly
+        # needed to make prev_line() work properly
+        self.pos1 = pos1
+
+        # pos[12] saved here to make locus() give the right location when used
+        #   after both peek_next_fortran_line() and next_fortran_line()
+        self._cpp_cur_pos1, self._cpp_cur_pos2 = self.pos1, self.pos2
+
         return("".join(fortran_line).strip())
 
     def peek_next_fortran_line(self, give_pos=False):
         """Peek at next fortran line"""
         pos1, pos2 = self.pos1, self.pos2
         line = self.next_fortran_line()
-        next_line_at = self.pos1
         self.pos1, self.pos2 = pos1, pos2
-        if( give_pos ): return (next_line_at, line)
+        if( give_pos ): return (self._cpp_cur_pos1, line)
         return(line)
 
     def locus(self):
-        """Convert position index into nice location string"""
-        fn = path.basename(self.filename)
-        return("%s:%d"%(fn,self.pos1))
+        """Convert position index into nice location string
+           The output location is that of the line returned by the last call of [peek_]next_fortran_line()"""
+        fn = path.basename(self._cpp_file_name)
+        line_index = self.buffer[ self._cpp_beg_pos1 : self._cpp_cur_pos1 ].count('\n') + self._cpp_line_index -1
+        return("%s:%d"%(fn,line_index))
 
 
 #=============================================================================
