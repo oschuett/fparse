@@ -47,7 +47,7 @@ def parse_module(stream):
     ast = {'tag':'module', 'name':name, 'uses':[], 'publics':[], 'types':[], 'subroutines':[], 'functions':[], 'interfaces':[], 'variables':[]}
 
     # parse stuff before CONTAINS
-    private = False
+    private, save = False, False
     private_syms = []
     while(True):
         line = stream.peek_next_fortran_line()
@@ -58,6 +58,9 @@ def parse_module(stream):
             stream.next_fortran_line() # skip line
         elif(line == "PRIVATE"):
             private = True
+            stream.next_fortran_line() # skip line
+        elif(line == "SAVE"):
+            save = True
             stream.next_fortran_line() # skip line
         elif(match_var_decl(line)):
             # these could be public if PRIVATE was not (yet) found
@@ -87,8 +90,12 @@ def parse_module(stream):
         else:
             raise ParserException(line, stream.locus())
 
-    # here all the PUBLIC/PRIVATE statements/attributes should have been set!
+    # here all the PUBLIC/PRIVATE/SAVE/... statements/attributes should have been set!
     set_visibility(ast['variables'], ast['publics'], private, private_syms)
+    if(save):
+        for v in ast['variables']:
+            assert( not 'SAVE' in v['attrs'] )
+            v['attrs'].append('SAVE')
 
     # parse stuff after CONTAINS
     while(True):
@@ -132,6 +139,7 @@ def parse_interface(stream):
         else:
             f = parse_routine(stream)
             assert(f['tag'] in ("subroutine", "function"))
+            # only the name of the subroutine/function is retained here
             ast['procedures'].append(f['name'])
     return(ast)
 
@@ -180,7 +188,7 @@ def set_visibility(variables, publics, private, privlist=[]):
     default = 'PRIVATE' if private else 'PUBLIC'
     for v in variables:
 
-        vis = set(v['attrs']['keywd_attrs']).intersection(('PRIVATE','PUBLIC'))
+        vis = set(v['attrs']).intersection(('PRIVATE','PUBLIC'))
         if(vis):
             # visibility already set via the variable declaration line!
             assert(not v['name'] in publist)
@@ -200,7 +208,7 @@ def set_visibility(variables, publics, private, privlist=[]):
 
 #===============================================================================
 def match_var_decl(line):
-    for t in ("CHARACTER", "INTEGER", "REAL", "COMPLEX", "LOGICAL", "TYPE("):
+    for t in ("CHARACTER", "INTEGER", "REAL", "COMPLEX", "LOGICAL", "TYPE(", "PROCEDURE("):
         if(line.startswith(t)):
             return(True)
     return(False)
@@ -243,7 +251,7 @@ def parse_var_decl(line):
 
 #===============================================================================
 def get_attributes(attrlist):
-    attrs = {'keywd_attrs':[], 'dimension':None, 'intent':None, 'raw':[]}
+    attrs = {'keywd_attrs':[], 'dimension':None, 'intent':None, 'bind':None, 'raw':[]}
     while(attrlist):
         k, v = get_next_attribute(attrlist)
         if(k in ("ALLOCATABLE", "EXTERNAL", "OPTIONAL",
@@ -256,18 +264,18 @@ def get_attributes(attrlist):
             intent = m.group(1)
             assert(intent in ("IN", "OUT", "INOUT"))
             attrs['intent'] = intent
-        elif(k ==  "DIMENSION"):
+        elif(k ==  "DIMENSION" or k == "BIND"):
             m = re.match("(\(.+\))$", v)
             assert(m)
-            attrs['dimension'] = v
+            attrs[k.lower()] = v
         else:
-            raise Exception('problem with input: "%s" (attr key: "%s")'%(line,k))
+            raise Exception('problem with input: "%s" (attr key: "%s")'%(attrlist,k))
         raw = k + v
         attrs['raw'].append(raw)
         to_skip = "," + raw
         assert(attrlist.startswith(to_skip))
         attrlist = attrlist[ len(to_skip) : ]  # skip the successfully processed attribute
-    return attrs
+    return attrs['raw']
 
 #===============================================================================
 def get_next_attribute(string):
@@ -362,7 +370,7 @@ def get_var_type(string):
 #===============================================================================
 def get_variables(varlist, vtype, attrs):
     """Return a list. Each list item is a dictionary related to a variable found in the input string.
-       Each variable comes with its name and eventually attributes, dimension, intent or initialization."""
+       Each variable comes with its name and eventually attributes (dimension, intent, ...) or initialization."""
     assert(varlist)
     variables = []
     varlist += ","
@@ -374,7 +382,7 @@ def get_variables(varlist, vtype, attrs):
 
         # update the variable with the common info
         v['type'] = vtype
-        v['attrs'] = attrs
+        v['attrs'] = attrs[:]
 
         variables.append(v)
     return variables
@@ -475,51 +483,35 @@ def parse_routine(stream):
 
     m = regex.match(line1)
     prefix, whatis, name, args, postfix = m.groups()
-    ast = {'tag':whatis.lower(), 'name':name, 'descr':doxygen['brief'], 'args':[], 'attrs':[]}
+    ast = {
+     'tag':whatis.lower(),
+     'name':name,
+     'descr':doxygen['brief'],
+     'args':[], 'attrs':[],
+     'retval':{'tag':'return_value', 'name':name} if whatis=='FUNCTION' else None
+    }
 
-    if(args):
-        for a in args.split(","):
-            descr = doxygen['param'][a] if(doxygen['param'].has_key(a)) else ""
-            ast['args'].append({'tag':'argument', 'name':a, 'descr':descr})
+    # update the ast according to info found in args, prefix and postfix
+    decode_args(ast, args)
+    decode_prefix(ast, prefix)
+    decode_postfix(ast, postfix)
+    commit_args_descr(ast, doxygen)
 
-    if(postfix):
-        for item, what, content in re.findall("((RESULT|BIND)\((.+?)\))", postfix.strip()):
-            if( what == "RESULT" ):
-                descr = doxygen['retval'][content] if(doxygen['retval'].has_key(content)) else ""
-                ast['retval'] = {'tag':'return_value', 'name':content, 'descr':descr}
-            elif( what == "BIND" ):
-                ast['attrs'].append(item)
-            else:
-                raise Exception("Unknown postfix item: "+item)
-
-    if(prefix):
-        retval_type = None
-        for a in prefix.split():
-            if(match_var_decl(a)):
-                assert(not retval_type and whatis=="FUNCTION")
-                retval_type = a
-                continue
-            assert(a in ("ELEMENTAL", "PURE", "RECURSIVE"))
-            ast['attrs'].append(a)
-        if(retval_type):
-            assert(not 'retval' in ast) # check meaningful if prefix is processed after postfix
-            retval = name.lower()
-            descr = doxygen['retval'][retval] if(doxygen['retval'].has_key(retval)) else ""
-            ast['retval'] = {'tag':'return_value', 'name':name, 'descr':descr, 'type':retval_type}
-
-    # support list of arguments name
+    # support stuff...
+    #   ...list of arguments names
     argnamelist = [a['name'] for a in ast['args']]
-    # for following code to work when retval is not defined
-    retvalname = ast['retval']['name'] if 'retval' in ast else ""
+    #   ...make the following code work when retval is not defined (subroutines)
+    retvalname = ast['retval']['name'] if ast['retval'] else ""
 
     # parse variable declarations: fetch info on arguments type and attributes
     while(True):
         line = stream.peek_next_fortran_line()
+
+        # variable declarations
         if(match_var_decl(line)):
             vlist = parse_var_decl(line)
             if(not vlist):
-                # line erroneously considered variable declaration by match_var_decl()
-                break
+                break  # this line isn't actually a variable declaration!
             for v in vlist:
                 a = v['name']
                 vinfo = {'type':v['type'], 'attrs':v['attrs']}
@@ -532,13 +524,35 @@ def parse_routine(stream):
                 else:
                     pass  # local variables
             stream.next_fortran_line() # skip line
+
+        # we could have a function/subroutine as argument!
+        elif(line.startswith("INTERFACE")):
+            intfc = parse_interface(stream)
+            assert(not intfc['name'] and len(intfc['procedures'])==1)
+            procedure = intfc['procedures'].pop()
+            if(procedure in argnamelist):
+                i = argnamelist.index(procedure)
+                ast['args'][i]['type'] = 'procedure'
+
+        # skip these lines!
+        #   if we don't, the scan for arguments type declaration will end prematurely
+        elif(line.startswith("USE ")):
+            stream.next_fortran_line()
+        elif(line.startswith("IMPORT")):
+            stream.next_fortran_line()
         elif(line == "IMPLICIT NONE"):
-            stream.next_fortran_line() # skip line
+            stream.next_fortran_line()
         else:
             break
 
+    # the declaration must have been found for each argument!
+    # (eventually for the return value too)
+    assert( all([a.has_key('type') for a in ast['args']]) )
+    if(whatis=='FUNCTION'):
+        assert( ast['retval'].has_key('type') )
+
     # skip over subroutines body and ignore nested subroutines
-    stack = [ast["tag"].upper()]
+    stack = [whatis]
     while(True):
         line = stream.next_fortran_line()
         m = regex.match(line)
@@ -547,24 +561,66 @@ def parse_routine(stream):
         elif(re.match("^END ?FUNCTION", line)):
             assert(stack.pop() == "FUNCTION")
         elif(m):
-            prefix, whatis, name, args, postfix = m.groups()
+            prefix, inner_whatis, name, args, postfix = m.groups()
             if(
                all(
                  [(a in ("ELEMENTAL", "PURE", "RECURSIVE") or match_var_decl(a)) for a in prefix.split()]
                )
             ):
-                stack.append( whatis )
+                stack.append( inner_whatis )
 
         if(not stack):
             break
 
     return(ast)
 
+#===============================================================================
+def decode_args(ast, args):
+    if(args):
+        for a in args.split(","):
+            ast['args'].append({'tag':'argument', 'name':a})
+
+#===============================================================================
+def decode_prefix(ast, prefix):
+    for a in prefix.split():
+        if(match_var_decl(a)):
+            assert(ast['tag']=="function")
+            assert(get_var_type(a) and get_var_type(a)==a)
+            ast['retval']['type'] = a
+        else:
+            assert(a in ("ELEMENTAL", "PURE", "RECURSIVE"))
+            ast['attrs'].append(a)
+
+#===============================================================================
+def decode_postfix(ast, postfix):
+    for item, what, content in re.findall("((RESULT|BIND)\((.+?)\))", postfix.strip()):
+        if( what == "RESULT" ):
+            # update the return value name
+            ast['retval']['name'] = content
+        elif( what == "BIND" ):
+            ast['attrs'].append(item)
+        else:
+            raise Exception("Unknown postfix item: "+item)
+
+#===============================================================================
+def commit_args_descr(ast, doxygen):
+    for arg in ast['args']:
+        a = arg['name']
+        arg['descr'] = doxygen['param'][a] if(doxygen['param'].has_key(a)) else ""
+    if(ast['retval']):
+        a = ast['retval']['name']
+        descr = doxygen['retval'][a] if(doxygen['retval'].has_key(a)) else ""
+        if(not descr):
+            # try with plain function name
+            a = ast['name']
+            descr = doxygen['retval'][a] if(doxygen['retval'].has_key(a)) else ""
+        ast['retval']['descr'] = descr
+
 
 #===============================================================================
 def parse_doxygen(stream):
     # Initialize
-    doxygen = {'author':[], 'brief':'', 'param':{}, 'retval':{}}
+    doxygen = {'author':[], 'brief':[], 'param':{}, 'retval':{}}
 
     # Save the beginning line of the subroutine/function
     #   If there is no valid doxygen block before the current subroutine or
@@ -608,10 +664,11 @@ def parse_doxygen(stream):
 
     # interpret doxygen tags
     for k, v in entries:
-        if(k == "brief"): # "If multiple \brief commands are present they will be joined"
-            doxygen[k] += " " + v.strip()
-        elif(k == "author"):
-            doxygen[k].append(v.strip())
+        if(k == "brief" or k == "author"):
+            if(v.strip() != "..."):
+                # Doxygen cmd documentation says:
+                #   "If multiple \brief (\author) commands are present they will be joined"
+                doxygen[k].append(v.strip())
         elif(k == "param" or k == "retval"):
             # Filter out [in], [out], ... and (optional) that otherwise will hide the argument
             v = re.sub("^\[(int|in|out|in[.,]? ?out)\]", "", v, count=1).strip()
