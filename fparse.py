@@ -37,14 +37,13 @@ def parse_file(fn):
 
 #===============================================================================
 def parse_module(stream):
-#    doxygen = parse_doxygen(stream)
-#    print doxygen
+    doxygen = parse_doxygen(stream)
 
     # parse opening line
     kw, name = stream.next_fortran_line().split()
     assert(kw == "MODULE")
 
-    ast = {'tag':'module', 'name':name, 'uses':[], 'publics':[], 'types':[], 'subroutines':[], 'functions':[], 'interfaces':[], 'variables':[]}
+    ast = {'tag':'module', 'name':name, 'descr':doxygen['brief'], 'uses':[], 'publics':[], 'types':[], 'subroutines':[], 'functions':[], 'interfaces':[], 'variables':[]}
 
     # parse stuff before CONTAINS
     private, save = False, False
@@ -296,7 +295,7 @@ def get_next_attribute(string):
                 ppattern = c
                 state = "p_open"
             else:
-                raise Exception('char "%c" unknown for state "%s" [%s]'%(c,state,string))
+                raise SM_UnknownCharException(c,state,string)
 
         elif(state=="p_open"):
             ppattern += c
@@ -350,7 +349,7 @@ def get_var_type(string):
                 ppattern = c
                 state = "p_open"
             else:
-                raise Exception('char "%c" unknown for state "%s" [%s]'%(c,state,string))
+                raise SM_UnknownCharException(c,state,string)
         elif(state=="p_open"):
             ppattern += c
             if(c == "("):
@@ -372,6 +371,7 @@ def get_variables(varlist, vtype, attrs):
     """Return a list. Each list item is a dictionary related to a variable found in the input string.
        Each variable comes with its name and eventually attributes (dimension, intent, ...) or initialization."""
     assert(varlist)
+    dim_from_attrs = next((re.match("DIMENSION(\(.+\))$",a).group(1) for a in attrs if a.startswith("DIMENSION(")), None)
     variables = []
     varlist += ","
     while(varlist):
@@ -383,6 +383,11 @@ def get_variables(varlist, vtype, attrs):
         # update the variable with the common info
         v['type'] = vtype
         v['attrs'] = attrs[:]
+        if(dim_from_attrs):
+            if(v['dim']):
+                assert(v['dim']==dim_from_attrs)
+            else:
+                v['dim'] = dim_from_attrs
 
         variables.append(v)
     return variables
@@ -394,7 +399,7 @@ def get_next_variable(string):
        initialization (eventually with quoted strings)."""
     m = re.match("(\w+)(.*)",string)
     name, postfix = m.groups()
-    v = {'tag':'variable', 'name':name}
+    v = {'tag':'variable', 'name':name, 'dim':''}
     n_opened = 0
     state = "start"
     ichar = 0
@@ -413,7 +418,7 @@ def get_next_variable(string):
                 ppattern = c
                 state = "p_open%" + state
             else:
-                raise Exception('char "%c" unknown for state "%s" [%s]'%(c,state,string[:-1]))
+                raise SM_UnknownCharException(c,state,string[:-1])
 
         elif(state=="init"):
             if(c == ','):
@@ -423,7 +428,7 @@ def get_next_variable(string):
                 state = "str:"+c
             elif(re.match('\w', c)):
                 v['init'] += c
-            elif(c in ('+','-','*','/','.','>')):
+            elif(c in ('+','-','*','/','.','>','%','=')):
                 v['init'] += c
             elif(c == '('):
                 assert(n_opened==0)
@@ -431,7 +436,7 @@ def get_next_variable(string):
                 ppattern = c
                 state = "p_open%" + state
             else:
-                raise Exception('char "%c" unknown for state "%s" [%s]'%(c,state,string[:-1]))
+                raise SM_UnknownCharException(c,state,string[:-1])
 
         elif(state.startswith("str:")):  # this state can only be reached from "init"
             v['init'] += c
@@ -487,7 +492,7 @@ def parse_routine(stream):
      'tag':whatis.lower(),
      'name':name,
      'descr':doxygen['brief'],
-     'args':[], 'attrs':[],
+     'args':[], 'attrs':[], 'uses':[], 'types':[],
      'retval':{'tag':'return_value', 'name':name} if whatis=='FUNCTION' else None
     }
 
@@ -514,7 +519,7 @@ def parse_routine(stream):
                 break  # this line isn't actually a variable declaration!
             for v in vlist:
                 a = v['name']
-                vinfo = {'type':v['type'], 'attrs':v['attrs']}
+                vinfo = {'type':v['type'], 'attrs':v['attrs'], 'dim':v['dim']}
                 if(a in argnamelist):
                     i = argnamelist.index(a)
                     ast['args'][i].update(vinfo)
@@ -534,20 +539,27 @@ def parse_routine(stream):
                 i = argnamelist.index(procedure)
                 ast['args'][i]['type'] = 'procedure'
 
-        # skip these lines!
+        # consider/skip these lines!
         #   if we don't, the scan for arguments type declaration will end prematurely
         elif(line.startswith("USE ")):
-            stream.next_fortran_line()
+            u = parse_use_statement(stream)
+            ast['uses'].append(u)
+        elif(line.startswith("TYPE")):
+            assert(not line.startswith("TYPE("))
+            t = parse_type(stream)
+            ast['types'].append(t)
+        elif(line.startswith("DATA")):
+            stream.next_fortran_line() # skip line
         elif(line.startswith("IMPORT")):
-            stream.next_fortran_line()
+            stream.next_fortran_line() # skip line
         elif(line == "IMPLICIT NONE"):
-            stream.next_fortran_line()
+            stream.next_fortran_line() # skip line
         else:
             break
 
     # the declaration must have been found for each argument!
     # (eventually for the return value too)
-    assert( all([a.has_key('type') for a in ast['args']]) )
+    assert( all(a.has_key('type') for a in ast['args']) )
     if(whatis=='FUNCTION'):
         assert( ast['retval'].has_key('type') )
 
@@ -563,9 +575,7 @@ def parse_routine(stream):
         elif(m):
             prefix, inner_whatis, name, args, postfix = m.groups()
             if(
-               all(
-                 [(a in ("ELEMENTAL", "PURE", "RECURSIVE") or match_var_decl(a)) for a in prefix.split()]
-               )
+               all((a in ("ELEMENTAL", "PURE", "RECURSIVE") or match_var_decl(a)) for a in prefix.split())
             ):
                 stack.append( inner_whatis )
 
@@ -628,13 +638,17 @@ def parse_doxygen(stream):
     #   stream till the end! So we save here a checkpoint that we later enforce
     #   not to be crossed.
     checkpoint, line1 = stream.peek_next_fortran_line(give_pos=True)
-    assert("SUBROUTINE" in line1 or "FUNCTION" in line1)
+    assert("MODULE" in line1 or "SUBROUTINE" in line1 or "FUNCTION" in line1)
     # advance stream position
     stream.next_fortran_line()
 
     # go backwards until a non-comment line is found
-    while(stream.prev_line().startswith("!")):
-        pass
+    while(True):
+        try:
+            if(not stream.prev_line().startswith("!")):
+                break
+        except BackwardEndOfFileException:
+            break
 
     # now go forward again until first doxygen line is found
     while(True):
@@ -654,7 +668,7 @@ def parse_doxygen(stream):
         line = stream.peek_next_line()
         if(not line.startswith("!>")):
             break
-        m = re.search(r"\\([a-z]+)(.*)", line) # the 2nd group could be an empty string (cf. \note)
+        m = re.search(r"\\([a-z]+)(.*)", line, re.I) # the 2nd group could be an empty string (cf. \note)
         if(m):
             entries.append(list(m.groups()))
         else:
@@ -674,7 +688,7 @@ def parse_doxygen(stream):
             v = re.sub("^\[(int|in|out|in[.,]? ?out)\]", "", v, count=1).strip()
             v = re.sub("^\((optinal|optional)\)", "", v, count=1).strip()
             if(v and " " in v):
-                assert(re.match("\w+",v))
+               #assert(re.match("\w+",v))
                 a, b = v.split(" ", 1)
                 if(b != "..."):
                     doxygen[k][a.upper()] = b.strip()
@@ -692,12 +706,25 @@ def parse_use_statement(stream):
         mod_from, rest = line[4:].split(",", 1)
         only = rest.split("ONLY:",1)[1].split(",")
         only_map = dict([tuple(x.split('=>',1)) if '=>' in x else (x,x) for x in only])
-        assert(all( [re.match('\w+$',k) for k in only_map] ))
+        assert( all(re.match('\w+$',k) for k in only_map) )
         ast = {'tag':'use_stm', 'from':mod_from, 'only':only_map}
     else:
         ast = {'tag':'use_stm', 'from':line[4:].strip()}
     return(ast)
 
+
+#===============================================================================
+class EndOfFileException(Exception):
+    def __init__(self):
+        pass
+class BackwardEndOfFileException(Exception):
+    def __init__(self):
+        pass
+
+#===============================================================================
+class SM_UnknownCharException(Exception):
+    def __init__(self, c, state, string):
+        print 'char "%c" unknown for state "%s" [%s]' % (c, state, string)
 
 #===============================================================================
 class ParserException(Exception):
@@ -717,7 +744,9 @@ class InputStream(object):
     def next_raw_line(self):
         """Return next line including CPP-comments and advance stream's position"""
         self.pos1 = self.pos2 + 1 # skip over '\n' or ';'
-        assert(self.pos1<len(self.buffer)) # cannot go beyond the stream's end
+        if(self.pos1>=len(self.buffer)):
+            # cannot go beyond the stream's end
+            raise EndOfFileException
         self.pos2 = self.buffer.find("\n", self.pos1)
         assert(self.pos2>0)
         line = self.buffer[ self.pos1 : self.pos2 ]
@@ -728,7 +757,9 @@ class InputStream(object):
         self.pos2 = self.pos1 - 1  # skip over '\n' or ';'
         assert( self.buffer[self.pos2] == '\n' )
         self.pos1 = self.buffer.rfind("\n", 0, self.pos2) + 1
-        assert(self.pos1>0)
+        if(self.pos1<=0):
+            # going on and on backwards, we reached the stream's begin!
+            raise BackwardEndOfFileException
         line = self.buffer[ self.pos1 : self.pos2 ]
         return(line)
 
@@ -801,6 +832,9 @@ class InputStream(object):
                     while(self.peek_next_line().strip().startswith("!")):
                         line = self.next_line()
                     i, line = -1, self.next_line() # line continuation
+                    if(line.strip().startswith("&")):
+                        # next (continued) line could begin with another echoed ampersand
+                        line = line.replace("&"," ",1)
                 elif(c==";"):
                     self.pos2 = self.pos1 + i
                     break # end of fortran line
