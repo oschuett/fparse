@@ -138,8 +138,8 @@ def parse_interface(stream):
         else:
             f = parse_routine(stream)
             assert(f['tag'] in ("subroutine", "function"))
-            # only the name of the subroutine/function is retained here
-            ast['procedures'].append(f['name'])
+            # only the name and tag of the subroutine/function is retained here
+            ast['procedures'].append({'name':f['name'], 'tag':f['tag']})
     return(ast)
 
 #===============================================================================
@@ -502,13 +502,9 @@ def parse_routine(stream):
     decode_postfix(ast, postfix)
     commit_args_descr(ast, doxygen)
 
-    # support stuff...
-    #   ...list of arguments names
-    argnamelist = [a['name'] for a in ast['args']]
-    #   ...make the following code work when retval is not defined (subroutines)
-    retvalname = ast['retval']['name'] if ast['retval'] else ""
-
     # parse variable declarations: fetch info on arguments type and attributes
+    var_decl_list = []
+    dimensions = {}
     while(True):
         line = stream.peek_next_fortran_line()
 
@@ -517,30 +513,19 @@ def parse_routine(stream):
             vlist = parse_var_decl(line)
             if(not vlist):
                 break  # this line isn't actually a variable declaration!
-            for v in vlist:
-                a = v['name']
-                vinfo = {'type':v['type'], 'attrs':v['attrs'], 'dim':v['dim']}
-                if(a in argnamelist):
-                    i = argnamelist.index(a)
-                    ast['args'][i].update(vinfo)
-                elif(a == retvalname):
-                    assert(not 'type' in ast['retval'])
-                    ast['retval'].update(vinfo)
-                else:
-                    pass  # local variables
-            stream.next_fortran_line() # skip line
+            var_decl_list.extend( vlist )
+            stream.next_fortran_line() # advance stream
 
         # we could have a function/subroutine as argument!
         elif(line.startswith("INTERFACE")):
             intfc = parse_interface(stream)
             assert(not intfc['name'] and len(intfc['procedures'])==1)
-            procedure = intfc['procedures'].pop()
-            if(procedure in argnamelist):
-                i = argnamelist.index(procedure)
-                ast['args'][i]['type'] = 'procedure'
+            f = intfc['procedures'].pop()
+            var_decl_list.append( {'name':f['name'], 'type':'procedure', 'attrs':[f['tag']], 'dim':None} )
 
-        # consider/skip these lines!
-        #   if we don't, the scan for arguments type declaration will end prematurely
+        # explicitly handle the following cases, if we don't, the scan for arguments type declaration will end prematurely!
+        #
+        #   ..."USE" statements or TYPE definitions not in the module header
         elif(line.startswith("USE ")):
             u = parse_use_statement(stream)
             ast['uses'].append(u)
@@ -548,20 +533,40 @@ def parse_routine(stream):
             assert(not line.startswith("TYPE("))
             t = parse_type(stream)
             ast['types'].append(t)
-        elif(line.startswith("DATA")):
+        #
+        #   ...deferred attributes
+        elif(line.startswith("DIMENSION")):
+            vlist = get_variables(re.match("DIMENSION( |::)(.+)",line).group(2), vtype='UNKNOWN', attrs=[] )
+            dimensions.update(dict( (v['name'], v['dim']) for v in vlist ))
+            stream.next_fortran_line()
+        elif(re.split('\W+',line,1)[0] in ('ALLOCATABLE', 'EXTERNAL')):
+            kw, sep, vlist = re.match("(ALLOCATABLE|EXTERNAL)( |::)(.+)", line).groups()
+            assert(not set(vlist.split(",")).intersection(a['name'] for a in ast['args'])) # TODO
+            stream.next_fortran_line()
+        #
+        #   ...these attributes conflict with the "DUMMY" attribute of an argument, they can be safely ignored
+        elif(re.match("PARAMETER\((.+)\)", line)):
+            stream.next_fortran_line()
+        elif(re.match("SAVE( |::)(.+)", line)):
+            stream.next_fortran_line()
+        #
+        #   ...simply skip these lines
+        elif(line.startswith("DATA") or
+             line.startswith("IMPORT") or
+             line == "IMPLICIT NONE"):
             stream.next_fortran_line() # skip line
-        elif(line.startswith("IMPORT")):
-            stream.next_fortran_line() # skip line
-        elif(line == "IMPLICIT NONE"):
-            stream.next_fortran_line() # skip line
+
+        elif(re.match("END ?"+whatis, line)):
+            break
+
+        # this should be the first executable statement...
         else:
             break
 
     # the declaration must have been found for each argument!
     # (eventually for the return value too)
-    assert( all(a.has_key('type') for a in ast['args']) )
-    if(whatis=='FUNCTION'):
-        assert( ast['retval'].has_key('type') )
+    commit_arg_type(ast, var_decl_list, dimensions)
+    commit_retval_type(ast, var_decl_list, dimensions)
 
     # skip over subroutines body and ignore nested subroutines
     stack = [whatis]
@@ -611,6 +616,43 @@ def decode_postfix(ast, postfix):
             ast['attrs'].append(item)
         else:
             raise Exception("Unknown postfix item: "+item)
+
+#===============================================================================
+def commit_arg_type(ast, var_decl_list, dimensions):
+
+    # support list of variables names
+    vnamelist = [v['name'] for v in var_decl_list]
+
+    for a in ast['args']:
+        # set type and attributes
+        v = var_decl_list[ vnamelist.index(a['name']) ]
+        a.update( {'type':v['type'], 'attrs':v['attrs'], 'dim':v['dim']} )
+        # optionally update dimension
+        if( a['name'] in dimensions ):
+            if( a['dim'] ):
+                assert(a['dim'] == dimensions[a['name']])
+            else:
+                a['dim'] = dimensions[a['name']]
+
+    # final check
+    assert( all(a.has_key('type') for a in ast['args']) )
+
+#===============================================================================
+def commit_retval_type(ast, var_decl_list, dimensions):
+
+    # support list of variables names
+    vnamelist = [v['name'] for v in var_decl_list]
+
+    a = ast['retval']
+    if(a):
+        assert(ast['tag'] == 'function')
+        assert(not a['name'] in dimensions) # TODO
+        if(a['name'] in vnamelist):
+            v = var_decl_list[ vnamelist.index(a['name']) ]
+            a.update( {'type':v['type'], 'attrs':v['attrs'], 'dim':v['dim']} )
+        else:
+            # it should have been assigned in decode_prefix()
+            assert(a['type'])
 
 #===============================================================================
 def commit_args_descr(ast, doxygen):
