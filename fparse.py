@@ -61,6 +61,9 @@ def parse_module(stream):
         elif(line == "SAVE"):
             save = True
             stream.next_fortran_line() # skip line
+        elif(line.startswith("DATA ")):
+            # TODO!!!!
+            stream.next_fortran_line() # skip line
         elif(match_var_decl(line)):
             # these could be public if PRIVATE was not (yet) found
             vlist = parse_var_decl(line)
@@ -132,10 +135,17 @@ def parse_interface(stream):
         m = re.match("^MODULE PROCEDURE (.+)$", line)
         if(m):
             assert(name)
-            ast['task'] = 'overloading'
+            if('task' in ast):
+                assert(ast['task'] == 'overloading')
+            else:
+                ast['task'] = 'overloading'
             ast['procedures'].extend( m.group(1).split(",") )
             stream.next_fortran_line()
         else:
+            if('task' in ast):
+                assert(ast['task'] == 'explicit_interface')
+            else:
+                ast['task'] = 'explicit_interface'
             f = parse_routine(stream)
             assert(f['tag'] in ("subroutine", "function"))
             # only the name and tag of the subroutine/function is retained here
@@ -401,6 +411,7 @@ def get_next_variable(string):
     name, postfix = m.groups()
     v = {'tag':'variable', 'name':name, 'dim':''}
     n_opened = 0
+    n_square = 0
     state = "start"
     ichar = 0
     while(True):  # process char by char what is beyond the identifier
@@ -435,6 +446,11 @@ def get_next_variable(string):
                 n_opened = 1
                 ppattern = c
                 state = "p_open%" + state
+            elif(c == '['):
+                assert(n_square==0)
+                n_square = 1
+                sqpattern = c
+                state = "sq_open%" + state
             else:
                 raise SM_UnknownCharException(c,state,string[:-1])
 
@@ -455,6 +471,20 @@ def get_next_variable(string):
                         v['dim'] = ppattern
                     elif(prev_state == "init"):
                         v['init'] += ppattern
+                    else:
+                        raise Exception('unknown previous state: "%s"'%prev_state)
+                    state = prev_state
+
+        elif(state.startswith("sq_open%")):
+            sqpattern  += c
+            if(c == "["):
+                n_square += 1
+            elif(c == "]"):
+                n_square -= 1
+                if(n_square==0):
+                    prev_state = state.split("%",1)[1]
+                    if(prev_state == "init"):
+                        v['init'] += sqpattern
                     else:
                         raise Exception('unknown previous state: "%s"'%prev_state)
                     state = prev_state
@@ -521,7 +551,7 @@ def parse_routine(stream):
             intfc = parse_interface(stream)
             assert(not intfc['name'] and len(intfc['procedures'])==1)
             f = intfc['procedures'].pop()
-            var_decl_list.append( {'name':f['name'], 'type':'procedure', 'attrs':[f['tag']], 'dim':None} )
+            var_decl_list.append( {'name':f['name'], 'type':'PROCEDURE', 'attrs':[f['tag']], 'dim':None} )
 
         # explicitly handle the following cases, if we don't, the scan for arguments type declaration will end prematurely!
         #
