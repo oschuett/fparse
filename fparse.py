@@ -94,10 +94,7 @@ def parse_module(stream):
 
     # here all the PUBLIC/PRIVATE/SAVE/... statements/attributes should have been set!
     set_visibility(ast['variables'], ast['publics'], private, private_syms)
-    if(save):
-        for v in ast['variables']:
-            assert( not 'SAVE' in v['attrs'] )
-            v['attrs'].append('SAVE')
+    set_staticness(ast['variables'], save)
 
     # parse stuff after CONTAINS
     while(True):
@@ -204,6 +201,8 @@ def set_visibility(variables, publics, private, privlist=[]):
             assert(not v['name'] in privlist)
             assert(len(vis)==1)
             v['visibility'] = vis.pop()
+            if v['visibility'] == 'PUBLIC':
+                publics.append({'tag':'public', 'name':v['name'], 'is_api':False})
 
         elif(v['name'] in publist):
             v['visibility'] = 'PUBLIC'
@@ -214,6 +213,14 @@ def set_visibility(variables, publics, private, privlist=[]):
         else:
             # fallback to default visibility
             v['visibility'] = default
+
+#===============================================================================
+def set_staticness(variables, save):
+    if(save):
+        for v in variables:
+            assert( not 'SAVE' in v['attrs'] )
+            if( not 'PARAMETER' in v['attrs'] ):    # SAVE conflicts with
+                v['attrs'].append('SAVE')           # the PARAMETER attribute!
 
 #===============================================================================
 def match_var_decl(line):
@@ -643,7 +650,7 @@ def decode_postfix(ast, postfix):
             # update the return value name
             ast['retval']['name'] = content
         elif( what == "BIND" ):
-            ast['attrs'].append(item)
+            ast.setdefault('post_attrs',[]).append(item)
         else:
             raise Exception("Unknown postfix item: "+item)
 
