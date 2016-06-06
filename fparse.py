@@ -81,7 +81,7 @@ def parse_module(stream):
             syms = parse_pubpriv_statement(stream)
             # only the name of these symbols is retained here
             private_syms.extend([sym['name'] for sym in syms])
-        elif(line.startswith("INTERFACE")):
+        elif(line.startswith("INTERFACE") or line.startswith("ABSTRACT INTERFACE")):
             a =  parse_interface(stream)
             ast['interfaces'].append(a)
         elif(line == "CONTAINS"):
@@ -118,7 +118,8 @@ def parse_module(stream):
 
 #===============================================================================
 def parse_interface(stream):
-    line = stream.next_fortran_line()
+    raw_line = stream.next_fortran_line()
+    prefix, line = re.match("(ABSTRACT )?(INTERFACE.*)", raw_line).groups()
     assert(line.startswith("INTERFACE"))
     name = line.split(" ",1)[1] if(" " in line) else ""
     ast = {'tag':'interface', 'name':name, 'procedures':[]}
@@ -147,6 +148,8 @@ def parse_interface(stream):
             assert(f['tag'] in ("subroutine", "function"))
             # only the name and tag of the subroutine/function is retained here
             ast['procedures'].append({'name':f['name'], 'tag':f['tag']})
+            if prefix:
+                ast['procedures'][-1]['attrs'] = prefix.strip()
     return(ast)
 
 #===============================================================================
