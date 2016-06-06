@@ -148,8 +148,11 @@ def parse_interface(stream):
             assert(f['tag'] in ("subroutine", "function"))
             # only the name and tag of the subroutine/function is retained here
             ast['procedures'].append({'name':f['name'], 'tag':f['tag']})
-            if prefix:
-                ast['procedures'][-1]['attrs'] = prefix.strip()
+    # abstract interfaces
+    if prefix:
+        assert(prefix.strip() == 'ABSTRACT' and len(ast['procedures']) == 1)
+        name = ast['procedures'][0]['name']
+        ast.update( {'name':name, 'task':'abstract_interface'} )
     return(ast)
 
 #===============================================================================
