@@ -536,7 +536,7 @@ def parse_routine(stream):
      'name':name,
      'descr':doxygen['brief'],
      'args':[], 'attrs':[], 'uses':[], 'types':[],
-     'retval':{'tag':'return_value', 'name':name} if whatis=='FUNCTION' else None
+     'retval':{'tag':'return_value', 'name':name, 'descr':None} if whatis=='FUNCTION' else None
     }
 
     # update the ast according to info found in args, prefix and postfix
@@ -636,7 +636,7 @@ def parse_routine(stream):
 def decode_args(ast, args):
     if(args):
         for a in args.split(","):
-            ast['args'].append({'tag':'argument', 'name':a})
+            ast['args'].append({'tag':'argument', 'name':a, 'descr':None})
 
 #===============================================================================
 def decode_prefix(ast, prefix):
@@ -699,18 +699,31 @@ def commit_retval_type(ast, var_decl_list, dimensions):
 
 #===============================================================================
 def commit_args_descr(ast, doxygen):
-    for arg in ast['args']:
-        a = arg['name']
-        arg['descr'] = doxygen['param'][a] if(doxygen['param'].has_key(a)) else ""
-    if(ast['retval']):
-        a = ast['retval']['name']
-        descr = doxygen['retval'][a] if(doxygen['retval'].has_key(a)) else ""
-        if(not descr):
-            # try with plain function name
-            a = ast['name']
-            descr = doxygen['retval'][a] if(doxygen['retval'].has_key(a)) else ""
-        ast['retval']['descr'] = descr
 
+    assert(not doxygen['var'])
+
+    anames = [arg['name'] for arg in ast['args']]
+    for var, descr in doxygen['param'].iteritems():
+        if(isinstance(var, basestring) and var in anames):
+            ast['args'][anames.index(var)]['descr'] = descr
+        elif(isinstance(var, tuple) and all(vv in anames for vv in var)):
+            ast.setdefault('__grouped_args_descr__',[]).append( {'grouped_args':var, 'descr':descr} )
+
+    if(ast['retval']):
+        doxytag = doxygen['retval']
+        if doxytag:
+            assert(len(doxytag)==1)
+            doxyretvalname = doxytag.keys()[0]
+            assert(isinstance(doxyretvalname, basestring))
+
+            a = ast['retval']['name']
+            descr = doxytag[a] if(doxyretvalname == a) else ""
+            if(not descr):
+                # try with plain function name
+                a = ast['name']
+                descr = doxytag[a] if(doxyretvalname == a) else ""
+
+            ast['retval']['descr'] = descr
 
 #===============================================================================
 def parse_doxygen(stream):
