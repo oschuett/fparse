@@ -6,6 +6,7 @@ import sys
 import re
 from os import path
 from pprint import pprint
+from itertools import chain
 
 #===============================================================================
 def main():
@@ -157,10 +158,12 @@ def parse_interface(stream):
 
 #===============================================================================
 def parse_type(stream):
+    doxygen = parse_doxygen(stream)
+
     line = stream.next_fortran_line()
     assert(line.startswith("TYPE"))
     attrlist, sep, name = re.match("TYPE(,BIND\(.*\))?( |::)(.+)", line).groups()
-    ast = {'tag':'type', 'name':name, 'variables':[]}
+    ast = {'tag':'type', 'name':name, 'descr':doxygen['brief'], 'variables':[]}
 
     if attrlist:
         assert(sep=='::')
@@ -181,6 +184,7 @@ def parse_type(stream):
             raise ParserException(line, stream.locus())
 
     set_visibility(ast['variables'], [], private)
+    commit_type_members_descr(ast, doxygen)
 
     return(ast)
 
@@ -724,6 +728,17 @@ def commit_args_descr(ast, doxygen):
                 descr = doxytag[a] if(doxyretvalname == a) else ""
 
             ast['retval']['descr'] = descr
+
+#===============================================================================
+def commit_type_members_descr(ast, doxygen):
+    names = [v['name'] for v in ast['variables']]
+    for var, descr in chain(doxygen['var'].iteritems(), doxygen['param'].iteritems()):
+        if(isinstance(var, basestring) and var in names):
+            ast['variables'][names.index(var)]['descr'] = descr
+        elif(isinstance(var, tuple) and all(vv in names for vv in var)):
+            ast.setdefault('__grouped_vars_descr__',[]).append( {'grouped_args':var, 'descr':descr} )
+    for v in ast['variables']:
+        v.setdefault('descr')
 
 #===============================================================================
 def parse_doxygen(stream):
