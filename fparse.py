@@ -715,7 +715,7 @@ def commit_args_descr(ast, doxygen):
 #===============================================================================
 def parse_doxygen(stream):
     # Initialize
-    doxygen = {'author':[], 'brief':[], 'param':{}, 'retval':{}}
+    doxygen = {'author':[], 'brief':[], 'param':{}, 'retval':{}, 'var':{}}
 
     # Save the beginning line of the subroutine/function
     #   If there is no valid doxygen block before the current subroutine or
@@ -723,7 +723,7 @@ def parse_doxygen(stream):
     #   stream till the end! So we save here a checkpoint that we later enforce
     #   not to be crossed.
     checkpoint, line1 = stream.peek_next_fortran_line(give_pos=True)
-    assert("MODULE" in line1 or "SUBROUTINE" in line1 or "FUNCTION" in line1)
+    assert("MODULE" in line1 or "SUBROUTINE" in line1 or "FUNCTION" in line1 or "TYPE" in line1)
     # advance stream position
     stream.next_fortran_line()
 
@@ -756,9 +756,19 @@ def parse_doxygen(stream):
         m = re.search(r"\\([a-z]+)(.*)", line, re.I) # the 2nd group could be an empty string (cf. \note)
         if(m):
             entries.append(list(m.groups()))
+        elif line == "!>":
+            # Doxygen cmd documentation says:
+            #   "A brief description ends when a blank line
+            #    or another sectioning command is encountered."
+            # so let's start a new fake entry
+            entries.append([None, ''])
         else:
             assert(not line.startswith("!> \\")) # are we missing some doxygen tag?
-            entries[-1][1] += " " + line.split("!>",1)[1].strip()
+            if(entries):
+                entries[-1][1] += " " + line.split("!>",1)[1].strip()
+            else: # the Doxygen comment but with no tag
+                print '*** Error location: Doxygen block above', stream.locus()
+                assert False # Doxy with no tag??
         line = stream.next_line() # advance stream
 
     # interpret doxygen tags
@@ -768,20 +778,186 @@ def parse_doxygen(stream):
                 # Doxygen cmd documentation says:
                 #   "If multiple \brief (\author) commands are present they will be joined"
                 doxygen[k].append(v.strip())
-        elif(k == "param" or k == "retval"):
-            # Filter out [in], [out], ... and (optional) that otherwise will hide the argument
+        elif(k == "param" or k == "retval" or k == "var"):
+            # Filter out [in], [out], ... and (optional) right after the tag,
+            #   they otherwise will hide the argument...
             v = re.sub("^\[(int|in|out|in[.,]? ?out)\]", "", v, count=1).strip()
             v = re.sub("^\((optinal|optional)\)", "", v, count=1).strip()
-            if(v and " " in v):
-               #assert(re.match("\w+",v))
-                a, b = v.split(" ", 1)
-                if(b != "..."):
-                    doxygen[k][a.upper()] = b.strip()
+            if(v):
+                try:
+                    doxyvar = parse_doxyvar(v)
+                except (SM_UnknownCharException, SM_InvalidStateException):
+                    print '*** Error location: Doxygen block above', stream.locus()
+                else:
+                    doxygen[k].update( doxyvar )
         else:
             pass # ignore all other tags
             #raise(Exception("Strange Doxygen tag:"+k))
 
     return(doxygen)
+
+#===============================================================================
+def parse_doxyvar(tag_content):
+    varlist = []
+    n_opened, n_square = 0, 0
+    state = "start"
+    for i, c in enumerate(tag_content):
+        my_string = tag_content[:i] + "{" + tag_content[i] + "}" + tag_content[i+1:]
+
+        if(state=="start"):
+            if(re.match("\w", c)):
+                varlist.append(c)  # 1st char of the variable name
+                state = "ini_varname"
+            elif(c=='!'):
+                # TODO: issue with SUBROUTINE pbe_lda_calc (src/xc/xc_pbe.F):
+                #   there is a commented line in between the arguments
+                #   so doxify.sh gets confused and adds a "!" \param...
+                return(dict())
+            else:
+                raise SM_UnknownCharException(c,state,my_string)
+
+        elif(state=="ini_varname"):
+            if(re.match("\w", c)):
+                varlist[-1] += c  # completion of the variable name
+            elif(c==' '):
+                state = "waiting_for_nextvar_or_descr"
+            elif(c==','):
+                state = "waiting_for_next_var_name"
+            elif(c==':'):
+                # TODO: colon used as a separator between
+                #   the var name(s) and the description... Tolerated?
+                state = "got_varnames"
+            elif(c=='('):
+                assert(n_opened==0)
+                i_round_beg = i
+                n_opened = 1
+                ppattern = c
+                state = "p_open%" + state
+            else:
+                raise SM_UnknownCharException(c,state,my_string)
+
+        elif(state=="waiting_for_nextvar_or_descr" or state=="got_varnames"):
+            if(c==' '):
+                # go on stripping consecutive blanks
+                pass
+            elif(c==','):
+                state = "waiting_for_next_var_name"
+            elif(c==':'):
+                # TODO: colon used as a separator between
+                #   the var name(s) and the description... Tolerated?
+                state = "got_varnames"
+            elif(c=='.'):
+                descr = tag_content[i:]
+                if(descr=='...'):
+                    # could be either ellipsis: "..." (missing description)
+                    return(dict())
+                elif(re.match("\.(true|false)\.", descr, re.I)):
+                    # ...or a description can be started via ".TRUE." / ".FALSE."
+                    state = "got_descr"
+                    break
+                else:
+                    raise SM_UnknownCharException(c,state,my_string)
+            elif(
+              re.match("\w", c) or  # a word here starts the description
+              c in (
+
+                "*",    # used to emphasize something, used by doxygen, not yet by ast2doc, see:
+                        #   pint_staging.F:123, pint_normalmode.F:217
+
+                "'",    # the description can be started via a quoted string, doxygen seems to handle it
+                '"',    # see:
+                        #   kpoint_types.F:115, kpoint_types.F:286, kpoint_types.F:394, dbcsr_types.F:419,
+                        #   dbcsr_work_operations.F:164, dbcsr_operations.F:1504
+
+                "|",    # is a shourtcut for norm (e.g.: || grad rho ||);
+                        # doxygen seems to handle it!
+                        # see:
+                        #   xc_b97.F:538, xc_b97.F:1559, xc_lyp.F:901,
+                        #   xc_xbecke88.F:821, xc_xbecke88_long_range.F:259,
+                        #   xc_xbecke88_long_range.F:1033, xc_xbecke88_lr_adiabatic.F:265,
+                        #   xc_xbecke88_lr_adiabatic.F:3043, xc_xbeef.F:419
+
+                "=",    # there are some formulas... TODO: how to handle them?
+
+              )
+            ):
+                descr = tag_content[i:]
+                state = "got_descr"
+                break
+            elif(c=='('):
+                # we'll ignore info like (optional): we rely on the proper attribute!
+                assert(n_opened==0)
+                i_round_beg = i
+                n_opened = 1
+                ppattern = c
+                state = "p_open%" + state
+            elif(c=='['):
+                # we'll ignore info like [output], ...: we rely on "INTENT" attribute!
+                assert(n_square==0)
+                i_square_beg = i
+                n_square = 1
+                sqpattern = c
+                state = "sq_open%" + state
+            else:
+                raise SM_UnknownCharException(c,state,my_string)
+
+        elif(state=="waiting_for_next_var_name"):
+            if(c==' '):
+                pass
+            elif(re.match("\w", c)):
+                varlist.append(c)
+                state = "ini_varname"
+            else:
+                raise SM_UnknownCharException(c,state,my_string)
+
+        elif(state.startswith("p_open%")):
+            ppattern += c
+            if(c == "("):
+                n_opened += 1
+            elif(c == ")"):
+                n_opened -= 1
+                if(n_opened==0):
+                    # check on previous state
+                    prev_state = state.split("%",1)[1]
+                    if(not prev_state in ("ini_varname", "waiting_for_nextvar_or_descr")):
+                        raise SM_InvalidStateException('previous', prev_state, tag_content)
+                    state = prev_state
+                    # check on the round braket content
+                    if(not ppattern in ("(optional)", )):
+                        descr = tag_content[i_round_beg:]
+                        state = "got_descr"
+                        break
+
+        elif(state.startswith("sq_open%")):
+            sqpattern += c
+            if(c == "["):
+                n_square += 1
+            elif(c == "]"):
+                n_square -= 1
+                if(n_square==0):
+                    # check on previous state
+                    prev_state = state.split("%",1)[1]
+                    if(not prev_state in ("waiting_for_nextvar_or_descr", "got_varnames")):
+                        raise SM_InvalidStateException('previous', prev_state, tag_content)
+                    state = prev_state
+                    # check on the square braket content
+                    if(not sqpattern in ("[output]", "[input]", "[OPTIONAL]")):
+                        descr = tag_content[i_square_beg:]
+                        state = "got_descr"
+                        break
+
+        else:
+            assert(False) # Unknown state
+
+    # check final state
+    if(state != "got_descr"):
+        # final state is not allowed
+        raise SM_InvalidStateException('final', state, tag_content)
+
+    if len(varlist)==1:
+        return {varlist.pop().upper():descr}
+    else:
+        return {tuple(v.upper() for v in varlist):descr}
 
 #===============================================================================
 def parse_use_statement(stream):
@@ -809,7 +985,10 @@ class BackwardEndOfFileException(Exception):
 #===============================================================================
 class SM_UnknownCharException(Exception):
     def __init__(self, c, state, string):
-        print 'char "%c" unknown for state "%s" [%s]' % (c, state, string)
+        print 'SM_Error: char "%c" unknown for state "%s" [%s]' % (c, state, string)
+class SM_InvalidStateException(Exception):
+    def __init__(self, spec, state, string):
+        print 'SM_Error: invalid %s state: "%s" [%s]' % (spec, state, string)
 
 #===============================================================================
 class ParserException(Exception):
