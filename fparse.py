@@ -42,6 +42,7 @@ def parse_module(stream):
 
     # parse opening line
     kw, name = stream.next_fortran_line().split()
+    beg_locus = stream.locus()
     assert(kw == "MODULE")
 
     ast = {'tag':'module', 'name':name, 'descr':doxygen['brief'], 'uses':[], 'publics':[], 'types':[], 'subroutines':[], 'functions':[], 'interfaces':[], 'variables':[]}
@@ -71,6 +72,7 @@ def parse_module(stream):
             assert(vlist) # No executable statements allowed here!
             ast['variables'].extend(vlist)
             stream.next_fortran_line() # skip line
+            commit_locus_inplace(vlist, stream.locus())
         elif(line.startswith("TYPE")):
             assert(not line.startswith("TYPE("))
             t = parse_type(stream)
@@ -111,6 +113,7 @@ def parse_module(stream):
             assert(s['tag']=='function')
             ast['functions'].append(s)
         elif(re.match("^END ?MODULE", line)):
+            ast['beg_end_loci'] = (beg_locus, stream.locus())
             break # found module's closing line
         else:
             raise ParserException(line, stream.locus())
@@ -118,8 +121,15 @@ def parse_module(stream):
     return(ast)
 
 #===============================================================================
+def commit_locus_inplace(vlist, locus):
+    for v in vlist:
+        assert(not 'locus' in v)
+        v['locus'] = locus
+
+#===============================================================================
 def parse_interface(stream):
     raw_line = stream.next_fortran_line()
+    beg_locus = stream.locus()
     prefix, line = re.match("(ABSTRACT )?(INTERFACE.*)", raw_line).groups()
     assert(line.startswith("INTERFACE"))
     name = line.split(" ",1)[1] if(" " in line) else ""
@@ -130,6 +140,7 @@ def parse_interface(stream):
         line = stream.peek_next_fortran_line()
         if(re.match("^END ?INTERFACE", line)):
             stream.next_fortran_line()
+            ast['beg_end_loci'] = (beg_locus, stream.locus())
             break
         m = re.match("^MODULE PROCEDURE (.+)$", line)
         if(m):
@@ -161,6 +172,7 @@ def parse_type(stream):
     doxygen = parse_doxygen(stream)
 
     line = stream.next_fortran_line()
+    beg_locus = stream.locus()
     assert(line.startswith("TYPE"))
     attrlist, sep, name = re.match("TYPE(,BIND\(.*\))?( |::)(.+)", line).groups()
     ast = {'tag':'type', 'name':name, 'descr':doxygen['brief'], 'variables':[]}
@@ -173,6 +185,7 @@ def parse_type(stream):
     while(True):
         line = stream.next_fortran_line()
         if(re.match("^END ?TYPE", line)):
+            ast['beg_end_loci'] = (beg_locus, stream.locus())
             break
         elif(line == "PRIVATE"):
             private = True
@@ -520,6 +533,7 @@ def parse_routine(stream):
     doxygen = parse_doxygen(stream)
 
     line1 = stream.next_fortran_line()
+    beg_locus = stream.locus()
     regex = re.compile('(.*)(FUNCTION|SUBROUTINE) (\w+)(?:\((.*?)\))?(.*)') # it is used afterwards too...
     #                   |   |                     |    |    |        |
     #                   |   |                     |    |    |        .
@@ -632,6 +646,7 @@ def parse_routine(stream):
                 stack.append( inner_whatis )
 
         if(not stack):
+            ast['beg_end_loci'] = (beg_locus, stream.locus())
             break
 
     return(ast)
