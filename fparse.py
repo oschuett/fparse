@@ -95,7 +95,14 @@ def parse_module(stream):
         else:
             raise ParserException(line, stream.locus())
 
-    # here all the PUBLIC/PRIVATE/SAVE/... statements/attributes should have been set!
+    # here ...
+    #   ...all the USE..ONLY statements/attributes should have been collected!
+    ast['multiple_imports'] = multiple_imports(ast['uses'])
+
+    #   ...all the INTERFACES should have been collected!
+    merge_interfaces_inplace(ast['interfaces'])
+
+    #   ...all the PUBLIC/PRIVATE/SAVE/... statements/attributes should have been set!
     set_visibility(ast['variables'], ast['publics'], private, private_syms)
     set_staticness(ast['variables'], save)
 
@@ -119,6 +126,43 @@ def parse_module(stream):
             raise ParserException(line, stream.locus())
 
     return(ast)
+
+#===============================================================================
+def merge_interfaces_inplace(interfaces):
+
+    todo = {}
+    for i in interfaces:
+        if i['task']=='overloading':
+            todo.setdefault(i['name'], []).append(i)
+
+    for k, v in todo.iteritems():
+        if (len(v)>1):
+            print "MULTI:", k
+            assert all(i['name']==k for i in v)
+            merged_i = {'name':k, 'tag':'interface', 'task': 'overloading'}
+            for i in v:
+                merged_i.setdefault('procedures', []).extend(i['procedures'])
+                merged_i.setdefault('beg_end_loci', []).append(i['beg_end_loci']) # TODO: this could be tricky!
+                interfaces.remove(i)
+            interfaces.append(merged_i)
+
+#===============================================================================
+def multiple_imports(uses):
+
+    mult_imports = {}
+    for u in uses:
+        if 'only' in u:
+            mod_from = u['from']
+            for k, v in u['only'].iteritems():
+                mult_imports.setdefault(k, []).append(":".join([mod_from, v]))
+        else:
+            pass # TODO: cannot check in this case...
+
+    keys_to_delete = [k for k, v in mult_imports.iteritems() if (len(v)==1)]
+    for k in keys_to_delete:
+        del mult_imports[k]
+
+    return(mult_imports)
 
 #===============================================================================
 def commit_locus_inplace(vlist, locus):
@@ -624,8 +668,12 @@ def parse_routine(stream):
         else:
             break
 
-    # the declaration must have been found for each argument!
-    # (eventually for the return value too)
+    # here ...
+    #   ...all the USE..ONLY statements/attributes should have been collected!
+    ast['multiple_imports'] = multiple_imports(ast['uses'])
+
+    #   ...the declaration must have been found for each argument!
+    #       (eventually for the return value too)
     commit_arg_type(ast, var_decl_list, dimensions)
     commit_retval_type(ast, var_decl_list, dimensions)
 
