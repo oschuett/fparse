@@ -338,7 +338,7 @@ def get_attributes(attrlist):
     while(attrlist):
         k, v = get_next_attribute(attrlist)
         if(k in ("ALLOCATABLE", "EXTERNAL", "OPTIONAL",
-                 "PARAMETER", "POINTER", "PRIVATE", "PUBLIC",
+                 "PARAMETER", "POINTER", "PRIVATE", "PUBLIC", "PROTECTED",
                  "SAVE", "TARGET", "VALUE", "VOLATILE")):
             assert(not v)
             attrs['keywd_attrs'].append(k)
