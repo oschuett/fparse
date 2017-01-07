@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import subprocess
+from subprocess import Popen, PIPE
 import sys
 import re
 from os import path
@@ -1089,8 +1089,14 @@ class ParserException(Exception):
 #===============================================================================
 class InputStream(object):
     def __init__(self, filename):
-        cmd = ["cpp", "-nostdinc", "-traditional-cpp", "-D__parallel", filename]
-        self.buffer = check_output(cmd)
+        # run Fypp and C-preprocessor
+        fypp_proc = Popen(['fypp', "-n", path.basename(filename)], cwd=path.dirname(filename), stdout=PIPE)
+        cpp_cmd = ["cpp", "-nostdinc", "-traditional-cpp", "-D__parallel"]
+        cpp_proc  = Popen(cpp_cmd, cwd=path.dirname(filename), stdin=fypp_proc.stdout, stdout=PIPE)
+        fypp_proc.stdout.close() # enable write error in cpp if cpp dies
+        self.buffer = cpp_proc.communicate()[0]
+        assert(cpp_proc.wait() == 0)
+
         self.filename = filename
         self.pos1 = -1
         self.pos2 = -1
@@ -1230,14 +1236,6 @@ class InputStream(object):
         line_index = self.buffer[ self._cpp_beg_pos1 : self._cpp_cur_pos1 ].count('\n') + self._cpp_line_index -1
         return("%s:%d"%(fn,line_index))
 
-
-#=============================================================================
-def check_output(*popenargs, **kwargs):
-    """ backport for Python 2.4 """
-    p = subprocess.Popen(stdout=subprocess.PIPE, *popenargs, **kwargs)
-    output = p.communicate()[0]
-    assert(p.wait() == 0)
-    return output
 
 #===============================================================================
 if __name__ == '__main__':
