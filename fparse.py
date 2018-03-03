@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 from subprocess import Popen, PIPE
@@ -23,7 +23,7 @@ def main():
     pprint(ast, stream=f)
     f.close()
 
-    print "Wrote: "+fn_out
+    print("Wrote: "+fn_out)
 
 #===============================================================================
 def parse_file(fn):
@@ -135,9 +135,9 @@ def merge_interfaces_inplace(interfaces):
         if i['task']=='overloading':
             todo.setdefault(i['name'], []).append(i)
 
-    for k, v in todo.iteritems():
+    for k, v in todo.items():
         if (len(v)>1):
-            print "MULTI:", k
+            print("MULTI:", k)
             assert all(i['name']==k for i in v)
             merged_i = {'name':k, 'tag':'interface', 'task': 'overloading'}
             for i in v:
@@ -153,12 +153,12 @@ def multiple_imports(uses):
     for u in uses:
         if 'only' in u:
             mod_from = u['from']
-            for k, v in u['only'].iteritems():
+            for k, v in u['only'].items():
                 mult_imports.setdefault(k, []).append(":".join([mod_from, v]))
         else:
             pass # TODO: cannot check in this case...
 
-    keys_to_delete = [k for k, v in mult_imports.iteritems() if (len(v)==1)]
+    keys_to_delete = [k for k, v in mult_imports.items() if (len(v)==1)]
     for k in keys_to_delete:
         del mult_imports[k]
 
@@ -745,7 +745,7 @@ def commit_arg_type(ast, var_decl_list, dimensions):
                 a['dim'] = dimensions[a['name']]
 
     # final check
-    assert( all(a.has_key('type') for a in ast['args']) )
+    assert( all('type' in a for a in ast['args']) )
 
 #===============================================================================
 def commit_retval_type(ast, var_decl_list, dimensions):
@@ -770,8 +770,8 @@ def commit_args_descr(ast, doxygen):
     assert(not doxygen['var'])
 
     anames = [arg['name'] for arg in ast['args']]
-    for var, descr in doxygen['param'].iteritems():
-        if(isinstance(var, basestring) and var in anames):
+    for var, descr in doxygen['param'].items():
+        if(isinstance(var, str) and var in anames):
             ast['args'][anames.index(var)]['descr'] = descr
         elif(isinstance(var, tuple) and all(vv in anames for vv in var)):
             ast.setdefault('__grouped_args_descr__',[]).append( {'grouped_args':var, 'descr':descr} )
@@ -780,8 +780,8 @@ def commit_args_descr(ast, doxygen):
         doxytag = doxygen['retval']
         if doxytag:
             assert(len(doxytag)==1)
-            doxyretvalname = doxytag.keys()[0]
-            assert(isinstance(doxyretvalname, basestring))
+            doxyretvalname = list(doxytag.keys())[0]
+            assert(isinstance(doxyretvalname, str))
 
             a = ast['retval']['name']
             descr = doxytag[a] if(doxyretvalname == a) else ""
@@ -795,8 +795,8 @@ def commit_args_descr(ast, doxygen):
 #===============================================================================
 def commit_type_members_descr(ast, doxygen):
     names = [v['name'] for v in ast['variables']]
-    for var, descr in chain(doxygen['var'].iteritems(), doxygen['param'].iteritems()):
-        if(isinstance(var, basestring) and var in names):
+    for var, descr in chain(doxygen['var'].items(), doxygen['param'].items()):
+        if(isinstance(var, str) and var in names):
             ast['variables'][names.index(var)]['descr'] = descr
         elif(isinstance(var, tuple) and all(vv in names for vv in var)):
             ast.setdefault('__grouped_vars_descr__',[]).append( {'grouped_args':var, 'descr':descr} )
@@ -858,7 +858,7 @@ def parse_doxygen(stream):
             if(entries):
                 entries[-1][1] += " " + line.split("!>",1)[1].strip()
             else: # the Doxygen comment but with no tag
-                print '*** Error location: Doxygen block above', stream.locus()
+                print('*** Error location: Doxygen block above', stream.locus())
                 assert False # Doxy with no tag??
         line = stream.next_line() # advance stream
 
@@ -878,7 +878,7 @@ def parse_doxygen(stream):
                 try:
                     doxyvar = parse_doxyvar(v)
                 except (SM_UnknownCharException, SM_InvalidStateException):
-                    print '*** Error location: Doxygen block above', stream.locus()
+                    print('*** Error location: Doxygen block above', stream.locus())
                 else:
                     doxygen[k].update( doxyvar )
         else:
@@ -1076,15 +1076,15 @@ class BackwardEndOfFileException(Exception):
 #===============================================================================
 class SM_UnknownCharException(Exception):
     def __init__(self, c, state, string):
-        print 'SM_Error: char "%c" unknown for state "%s" [%s]' % (c, state, string)
+        print('SM_Error: char "%c" unknown for state "%s" [%s]' % (c, state, string))
 class SM_InvalidStateException(Exception):
     def __init__(self, spec, state, string):
-        print 'SM_Error: invalid %s state: "%s" [%s]' % (spec, state, string)
+        print('SM_Error: invalid %s state: "%s" [%s]' % (spec, state, string))
 
 #===============================================================================
 class ParserException(Exception):
     def __init__(self, line, locus):
-        print 'Strange line: "%s" [%s]' % (line, locus)
+        print('Strange line: "%s" [%s]' % (line, locus))
 
 #===============================================================================
 class InputStream(object):
@@ -1094,7 +1094,7 @@ class InputStream(object):
         cpp_cmd = ["cpp", "-nostdinc", "-traditional-cpp", "-D__parallel"]
         cpp_proc  = Popen(cpp_cmd, cwd=path.dirname(filename), stdin=fypp_proc.stdout, stdout=PIPE)
         fypp_proc.stdout.close() # enable write error in cpp if cpp dies
-        self.buffer = cpp_proc.communicate()[0]
+        self.buffer = cpp_proc.communicate()[0].decode("ascii")
         assert(cpp_proc.wait() == 0)
 
         self.filename = filename
